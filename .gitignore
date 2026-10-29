@@ -41,5 +41,8 @@ data/
 *.tmp
 *.bak
 
+# 内部开发规范（不随仓库分发）
+AGENTS.md
+
 old/
 docs/
