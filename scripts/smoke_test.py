@@ -258,6 +258,9 @@ def test_config(core):
     check("默认开启解析", cfg.enablebilianalysis)
     check("默认模板含视频占位符", "${视频}" in cfg.link_template)
     check("默认模板为 emoji 风格", "📺" in cfg.link_template and "👍" in cfg.link_template)
+    check("默认模板含视频地址跳转", "🔗 ${视频地址}" in cfg.link_template)
+    check("默认卡片模板与通用同布局",
+          cfg.card_template == cfg.link_template)
     check("缺省卡片模板取 schema 默认",
           cfg.effective_card_template == core.config.DEFAULT_CARD_TEMPLATE)
     check("parse_limit 默认 3", cfg.parse_limit == 3)
