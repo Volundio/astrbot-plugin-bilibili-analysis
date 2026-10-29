@@ -286,29 +286,33 @@ async def run_tests() -> int:
     reason = service.enqueue(event, lp_mod.parse_bilibili_content(event.message_str), "link")
     check("入队未被频率限制拦截", reason is None)
     await asyncio.wait_for(service._queue.join(), timeout=15)
-    check("发送了消息", len(event.sent) >= 1)
-    forward_chains = [
-        c for chain in event.sent
-        for c in chain.chain
-        if type(c).__name__ == "Nodes"
+    check("发送了消息",
+          len(event.sent) >= 1
+          or any(a[0] == "send_group_forward_msg" for a in event.bot.actions))
+    # 合并转发改走手工 OneBot API：检查 bot.call_action 的转发调用
+    forward_actions = [
+        params for action, params in event.bot.actions
+        if action == "send_group_forward_msg"
     ]
-    check("合并转发 Nodes 构造", len(forward_chains) == 1)
-    if forward_chains:
-        nodes = forward_chains[0].nodes
+    check("合并转发经 OneBot API 发送", len(forward_actions) == 1)
+    if forward_actions:
+        fwd = forward_actions[0]
+        check("转发群号正确", fwd.get("group_id") == 98765)
+        nodes = fwd["messages"]
         # 默认模板无 ${~~~} 拆分：图文 1 节点 + 视频 1 节点 = 同一条合并转发
         check("图文与视频同属一条合并转发", len(nodes) == 2)
-        check("节点 uin 为发送者", all(n.uin == "10001" for n in nodes))
-        check("图文节点混合组件", len(nodes[0].content) >= 2)
-        video_nodes = [
-            n for n in nodes
-            if any(type(c).__name__ == "Video" for c in n.content)
-        ]
-        check("视频独占转发节点",
-              len(video_nodes) == 1
-              and len(video_nodes[0].content) == 1
-              and type(video_nodes[0].content[0]).__name__ == "Video")
-        video_comp = video_nodes[0].content[0]
-        check("视频文件为 file:// URI", str(video_comp.file).startswith("file://"))
+        check("节点 user_id 为发送者",
+              all(n["data"]["user_id"] == "10001" for n in nodes))
+        first_segs = nodes[0]["data"]["content"]
+        check("图文节点混合 text 与 image 段",
+              any(s["type"] == "text" for s in first_segs)
+              and any(s["type"] == "image" for s in first_segs))
+        video_segs = [s for n in nodes for s in n["data"]["content"]
+                      if s["type"] == "video"]
+        check("视频独占转发节点且仅 1 段", len(video_segs) == 1
+              and len(nodes[1]["data"]["content"]) == 1)
+        check("视频段为回调 URL（非 file:// 本地路径）",
+              str(video_segs[0]["data"]["file"]).startswith("http"))
 
     # 用例 1b：${~~~} 拆分模板 → 多个转发节点
     service1b, rm1b = await make_service(
@@ -318,12 +322,12 @@ async def run_tests() -> int:
     event1b = MockEvent("https://www.bilibili.com/video/BV1GOODVIDEO?p=9")
     service1b.enqueue(event1b, lp_mod.parse_bilibili_content(event1b.message_str), "link")
     await asyncio.wait_for(service1b._queue.join(), timeout=15)
-    nodes1b = [
-        c for chain in event1b.sent for c in chain.chain
-        if type(c).__name__ == "Nodes"
+    fwd1b = [
+        params for action, params in event1b.bot.actions
+        if action == "send_group_forward_msg"
     ]
     check("${~~~} 模板拆成多个节点",
-          nodes1b and len(nodes1b[0].nodes) == 3)
+          fwd1b and len(fwd1b[0]["messages"]) == 3)
     await service1b.close()
     await rm1b.close()
     sent_actions = [a for a in event.bot.actions if a[0] == "send_group_msg"]
@@ -348,24 +352,17 @@ async def run_tests() -> int:
     event2b = MockEvent("https://www.bilibili.com/video/BV1GOODVIDEO?p=7")
     service2b.enqueue(event2b, lp_mod.parse_bilibili_content(event2b.message_str), "link")
     await asyncio.wait_for(service2b._queue.join(), timeout=15)
-    check("sendVideo 关闭仍发送模板消息", len(event2b.sent) >= 1)
-    video_comps_2b = [
-        c for chain in event2b.sent for c in chain.chain
-        if type(c).__name__ == "Video"
-    ] + [
-        comp for chain in event2b.sent
-        for c in chain.chain if type(c).__name__ == "Nodes"
-        for node in c.nodes for comp in node.content
-        if type(comp).__name__ == "Video"
+    fwd2b = [
+        params for action, params in event2b.bot.actions
+        if action == "send_group_forward_msg"
     ]
-    check("sendVideo 关闭无视频组件", len(video_comps_2b) == 0)
-    image_comps_2b = [
-        comp for chain in event2b.sent
-        for c in chain.chain if type(c).__name__ == "Nodes"
-        for node in c.nodes for comp in node.content
-        if type(comp).__name__ == "Image"
-    ]
-    check("sendVideo 关闭封面照常发送", len(image_comps_2b) >= 1)
+    check("sendVideo 关闭仍发送模板消息", len(fwd2b) == 1)
+    segs2b = [s for n in fwd2b[0]["messages"] for s in n["data"]["content"]] \
+        if fwd2b else []
+    check("sendVideo 关闭无视频组件",
+          not any(s["type"] == "video" for s in segs2b))
+    check("sendVideo 关闭封面照常发送",
+          any(s["type"] == "image" for s in segs2b))
     check("sendVideo 关闭未新增下载",
           len(list(video_dir.glob("*.mp4"))) == mp4_count_before)
     await service2b.close()

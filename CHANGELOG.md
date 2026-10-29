@@ -2,6 +2,12 @@
 
 本插件版本遵循[语义化版本](https://semver.org/lang/zh-CN/)，记录格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.3.5] - 2026-10-30
+
+### 修复
+
+- **分离部署下合并转发内视频发送失败**（realpath ENOENT）：AstrBot 的 Nodes 组件对转发节点内视频不做上传转换，直接以 `file://` 本地路径交给协议端读取；NapCat 与 AstrBot 不同容器/主机时读不到该文件，转发必败。现改为插件层手工调用 OneBot 合并转发 API：节点内视频先经 AstrBot 文件服务上传转回调 URL（协议端经 URL 取文件），图文节点在前、视频独占节点在后，同属一条转发，任何部署形态均能送达；转发失败仍自动降级逐条发送
+
 ## [1.3.3] - 2026-10-30
 
 初始发布。B 站视频链接解析插件，移植自 [koishi-plugin-bilibili-videolink-analysis](https://www.npmjs.com/package/koishi-plugin-bilibili-videolink-analysis)。

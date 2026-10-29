@@ -86,10 +86,16 @@ def _build_astrbot_mock() -> None:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
+        def toDict(self):  # 简化 stub：非核心组件的回退序列化
+            return {"type": "unknown", "data": {}}
+
     class Plain(BaseMessageComponent):
         def __init__(self, text="", **_):
             super().__init__()
             self.text = text
+
+        async def to_dict(self):
+            return {"type": "text", "data": {"text": self.text}}
 
     class Image(BaseMessageComponent):
         def __init__(self, file="", **_):
@@ -100,6 +106,9 @@ def _build_astrbot_mock() -> None:
         def fromURL(url, **_):
             return Image(file=url)
 
+        async def convert_to_base64(self):
+            return "ZmFrZV9pbWFnZQ=="  # fake_base64_image
+
     class Video(BaseMessageComponent):
         def __init__(self, file="", **_):
             super().__init__()
@@ -108,6 +117,10 @@ def _build_astrbot_mock() -> None:
         @staticmethod
         def fromFileSystem(path, **_):
             return Video(file=f"file://{path}")
+
+        async def to_dict(self):
+            # 模拟 AstrBot 文件服务：本地路径 → 回调 URL
+            return {"type": "video", "data": {"file": "https://astrbot.mock/api/file/fake-token"}}
 
     class File(BaseMessageComponent):
         pass

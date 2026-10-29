@@ -14,8 +14,7 @@ from collections.abc import Callable
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import (
     BaseMessageComponent,
-    Node,
-    Nodes,
+    Image,
     Plain,
     Video,
 )
@@ -105,6 +104,84 @@ def _split_video_messages(
     return others, videos
 
 
+async def _to_onebot_segment(comp: BaseMessageComponent) -> dict | None:
+    """把 AstrBot 消息组件转为 OneBot 消息段 dict（用于手工构造转发节点）。
+
+    关键差异：Video 走组件自身的异步 to_dict()——AstrBot 会先把本地文件
+    注册到文件服务并返回回调 URL（协议端经 URL 取文件），而不是 Nodes
+    组件序列化时的 file:// 本地路径（协议端分离部署时读不到本地盘）。
+    """
+    if isinstance(comp, Plain):
+        if not comp.text.strip():
+            return None
+        return {"type": "text", "data": {"text": comp.text}}
+    if isinstance(comp, Image):
+        bs64 = await comp.convert_to_base64()
+        return {"type": "image", "data": {"file": f"base64://{bs64}"}}
+    if isinstance(comp, Video):
+        return await comp.to_dict()
+    return comp.toDict()
+
+
+async def _send_forward_message(
+    event: AstrMessageEvent,
+    node_contents: list[list[BaseMessageComponent]],
+) -> None:
+    """手工调用 OneBot 合并转发 API（绕过 AstrBot Nodes 组件序列化）。
+
+    Nodes 组件对节点内视频不做上传转换（file:// 直传协议端），在协议端
+    与 AstrBot 分离部署时必然 ENOENT；此处在插件层完成「上传转 URL」
+    后再拼转发消息，任何部署形态均可送达。
+    """
+    bot = getattr(event, "bot", None)
+    if bot is None:
+        raise RuntimeError("当前平台无 bot 实例，无法发送合并转发")
+
+    uin = event.get_sender_id() or "0"
+    nickname = event.get_sender_name() or uin
+    messages: list[dict] = []
+    for content in node_contents:
+        segments = []
+        for comp in content:
+            segment = await _to_onebot_segment(comp)
+            if segment is not None:
+                segments.append(segment)
+        if not segments:
+            continue
+        messages.append(
+            {
+                "type": "node",
+                "data": {
+                    "user_id": str(uin),
+                    "nickname": nickname,
+                    "content": segments,
+                },
+            }
+        )
+    if not messages:
+        return
+
+    group_id = event.get_group_id()
+    if group_id:
+        action = "send_group_forward_msg"
+        params: dict = {
+            "group_id": int(group_id) if group_id.isdigit() else group_id
+        }
+    else:
+        action = "send_private_forward_msg"
+        sender_id = event.get_sender_id()
+        params = {"user_id": int(sender_id) if sender_id.isdigit() else sender_id}
+
+    # 多账号路由（对齐 aiocqhttp 适配器的 self_id 传递）
+    raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+    if raw is not None and callable(getattr(raw, "get", None)):
+        self_id = raw.get("self_id")
+        if self_id:
+            params["self_id"] = self_id
+
+    await bot.call_action(action, messages=messages, **params)
+
+
 async def send_parsed_messages(
     event: AstrMessageEvent,
     messages: list[list[BaseMessageComponent]],
@@ -112,11 +189,12 @@ async def send_parsed_messages(
     logger: PluginLogger,
     is_disposed: Callable[[], bool],
 ) -> bool:
-    """按配置发送解析结果：合并转发（Nodes）或逐条发送。
+    """按配置发送解析结果：合并转发或逐条发送。
 
-    - 视频必须独占一条消息（OneBot 实现层硬性要求，与图文混链会被拒），
-      合并转发时视频作为独立节点放在图文节点之后，仍属同一条转发
-    - 合并转发发送失败时降级为逐条发送（DESIGN.md §9 第 3 条）
+    - 合并转发不走 AstrBot 的 Nodes 组件，而是手工调用 OneBot 转发 API：
+      节点内视频先经 AstrBot 文件服务上传转回调 URL（协议端分离部署时
+      读不到本地盘，file:// 直传必败）；图文节点在前、视频独占节点在后
+    - 合并转发失败时降级为逐条发送（视频走同一上传通道），保证送达
     """
     if is_disposed() or not messages:
         return False
@@ -125,16 +203,7 @@ async def send_parsed_messages(
 
     if config.use_figure and is_supported_platform(event):
         try:
-            sender_id = event.get_sender_id() or "0"
-            sender_name = event.get_sender_name() or sender_id
-            node_contents = figure_messages + video_messages  # 视频节点置后
-            nodes = Nodes(
-                [
-                    Node(uin=sender_id, name=sender_name, content=content)
-                    for content in node_contents
-                ]
-            )
-            await event.send(MessageChain(chain=[nodes]))
+            await _send_forward_message(event, figure_messages + video_messages)
             return True
         except Exception as error:
             logger.warn(f"合并转发发送失败，降级为逐条发送：{format_error(error)}")
