@@ -120,7 +120,9 @@ class BilibiliApi:
         try:
             return await self._fetch_view_official(target)
         except Exception as error:  # noqa: BLE001 —— 双源全败由上层统一提示
-            self._logger.warn(f"视频信息 API 全部失败：{format_error(error)}")
+            self._logger.warn(
+                f"官方兜底亦失败，主源与官方 API 均不可用：{format_error(error)}"
+            )
             return None
 
     async def _fetch_view_official(self, target: VideoTarget) -> BiliVideoView | None:
@@ -131,11 +133,19 @@ class BilibiliApi:
             **_json_headers(self._config.user_agent),
             **await self._wbi.cookie_header(),
         }
+
+        def parser(content: str) -> dict[str, Any] | None:
+            result = self._parse_view_response(content)
+            if result is None:
+                # B 站风控会返回 HTML 验证页，记录片段便于确认
+                self._logger.debug(f"官方 API 响应不可用，内容片段：{content[:200]!r}")
+            return result
+
         # view 接口对分 P 返回全部 pages，分 P 号在构造消息与取直链时使用
         data = await self._request_manager.request(
             api_url,
             headers,
-            self._parse_view_response,
+            parser,
             "视频信息 API(兜底)",
         )
         return self._view_from_data(data)
@@ -258,7 +268,7 @@ class BilibiliApi:
     # ---- 主源：xingzhige b_parse（信息与直链一次返回）----
 
     async def _fetch_view_xingzhige(self, target: VideoTarget) -> BiliVideoView | None:
-        """经 xingzhige 解析（原版数据源）。响应自带视频直链。"""
+        """经 xingzhige 解析（原版数据源，主源）。响应自带视频直链。"""
         base_url = (
             f"https://www.bilibili.com/video/{target.bvid}"
             if target.bvid
@@ -266,11 +276,19 @@ class BilibiliApi:
         )
         video_url = f"{base_url}?p={target.page}" if target.page > 1 else base_url
         api_url = f"{XINGZHIGE_API}?url={quote(video_url, safe='')}"
+
+        def parser(content: str) -> dict[str, Any] | None:
+            result = self._parse_xingzhige_response(content)
+            if result is None:
+                # 记录响应片段，便于定位「返回结果不可用」的具体内容
+                self._logger.debug(f"主源响应不可用，内容片段：{content[:200]!r}")
+            return result
+
         response = await self._request_manager.request(
             api_url,
             _json_headers(self._config.user_agent),
-            self._parse_xingzhige_response,
-            "视频解析 API(兜底)",
+            parser,
+            "视频解析 API(主源)",
         )
         data = response.get("data") or {}
         video_field = data.get("video") or {}
