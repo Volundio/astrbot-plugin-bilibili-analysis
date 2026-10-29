@@ -57,7 +57,36 @@ FAKE_BIG_VIDEO = b"X" * (2 * 1024 * 1024)  # 2MB 假视频（用于超限测试�
 _server_port = 0
 
 
-async def _handle_parse(request: web.Request) -> web.Response:
+async def _handle_view(request: web.Request) -> web.Response:
+    """官方 view API（兜底源）mock：BV1OFFICIAL 走兜底成功路径。"""
+    bvid = request.query.get("bvid", "")
+    aid = request.query.get("aid", "")
+    if "BV1OFFICIAL" in bvid or aid == "170001":
+        return web.json_response({
+            "code": 0,
+            "data": {
+                "bvid": "BV1OFFICIAL0",
+                "aid": 170001,
+                "title": "官方API解析的视频",
+                "desc": "主源失败时由官方 API 兜底",
+                "pic": "http://i0.hdslb.com/bfs/archive/official.jpg",
+                "duration": 300,
+                "owner": {"name": "官方UP", "face": "f", "mid": 42},
+                "stat": {
+                    "view": 123456, "like": 2333, "coin": 66,
+                    "favorite": 77, "share": 88, "danmaku": 99,
+                },
+                "pages": [
+                    {"page": 1, "cid": 111000, "part": "P1"},
+                    {"page": 2, "cid": 222000, "part": "P2"},
+                ],
+            },
+        })
+    return web.json_response({"code": -404, "message": "啥都木有"})
+
+
+async def _handle_b_parse(request: web.Request) -> web.Response:
+    """xingzhige 主源 mock：BV1GOOD 成功（信息+直链一次返回），其余失败。"""
     url = request.query.get("url", "")
     if "BV1GOOD" in url:
         return web.json_response({
@@ -78,6 +107,30 @@ async def _handle_parse(request: web.Request) -> web.Response:
             },
         })
     return web.json_response({"code": -404, "message": "啥都木有"})
+
+
+async def _handle_playurl(request: web.Request) -> web.Response:
+    """官方 playurl API mock：返回本地视频直链。"""
+    return web.json_response({
+        "code": 0,
+        "data": {"durl": [{"url": f"http://127.0.0.1:{_server_port}/video.mp4",
+                           "size": len(FAKE_VIDEO)}]},
+    })
+
+
+async def _handle_finger(request: web.Request) -> web.Response:
+    """finger/spi mock：返回 buvid3。"""
+    return web.json_response({"code": 0, "data": {"b_3": "fakebuvid3", "b_4": "fakeb4"}})
+
+
+async def _handle_nav(request: web.Request) -> web.Response:
+    """nav mock：返回 wbi keys。"""
+    return web.json_response({"code": 0, "data": {
+        "wbi_img": {
+            "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+            "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+        }
+    }})
 
 
 async def _handle_video(request: web.Request) -> web.Response:
@@ -178,7 +231,11 @@ async def run_tests() -> int:
 
     # 启动本地 mock 服务
     app = web.Application()
-    app.router.add_get("/b_parse", _handle_parse)
+    app.router.add_get("/view", _handle_view)
+    app.router.add_get("/b_parse", _handle_b_parse)
+    app.router.add_get("/playurl", _handle_playurl)
+    app.router.add_get("/finger", _handle_finger)
+    app.router.add_get("/nav", _handle_nav)
     app.router.add_get("/video.mp4", _handle_video)
     app.router.add_get("/big.mp4", _handle_big_video)
     app.router.add_get("/short/xyz", _handle_short)
@@ -196,7 +253,12 @@ async def run_tests() -> int:
     # 加载插件模块并指向本地端点
     config_mod = _load_module("config")
     api_mod = _load_module("bilibili_api")
-    api_mod.PARSE_API_BASE = f"{base}/b_parse"
+    api_mod.VIEW_API = f"{base}/view"
+    api_mod.XINGZHIGE_API = f"{base}/b_parse"
+    api_mod.PLAYURL_API = f"{base}/playurl"
+    wbi_mod = _load_module("wbi")
+    wbi_mod.FINGER_API = f"{base}/finger"
+    wbi_mod.NAV_API = f"{base}/nav"
     logger_mod = _load_module("logger")
     rm_mod = _load_module("request_manager")
     rl_mod = _load_module("rate_limiter")
@@ -304,7 +366,7 @@ async def run_tests() -> int:
     await service2b.close()
     await rm2b.close()
 
-    # 用例 3：不存在的视频 + showError
+    # 用例 3：不存在的视频 + showError（官方与兜底源都失败）
     service3, rm3 = await make_service(showError=True, loggerinfo=True)
     event3 = MockEvent("https://www.bilibili.com/video/BV1MISSING00")
     service3.enqueue(event3, lp_mod.parse_bilibili_content(event3.message_str), "link")
@@ -314,6 +376,24 @@ async def run_tests() -> int:
         if type(c).__name__ == "Plain"
     ]
     check("解析失败提示已发送", any("无法解析" in t for t in plain_texts))
+
+    # 用例 3b：主源失败 → 官方 API 兜底成功，直链走 playurl
+    service3b, rm3b = await make_service(isfigure=False)
+    event3b = MockEvent("https://www.bilibili.com/video/BV1OFFICIAL0")
+    service3b.enqueue(event3b, lp_mod.parse_bilibili_content(event3b.message_str), "link")
+    await asyncio.wait_for(service3b._queue.join(), timeout=15)
+    fallback_texts = [
+        c.text for chain in event3b.sent for c in chain.chain
+        if type(c).__name__ == "Plain"
+    ]
+    check("官方 API 兜底接管解析", any("官方API解析的视频" in t for t in fallback_texts))
+    fallback_videos = [
+        c for chain in event3b.sent for c in chain.chain
+        if type(c).__name__ == "Video"
+    ]
+    check("兜底路径直链经 playurl 获取", len(fallback_videos) == 1)
+    await service3b.close()
+    await rm3b.close()
 
     # 用例 4：视频大小限制
     service4, rm4 = await make_service(MaximumFileSizeMB=1)

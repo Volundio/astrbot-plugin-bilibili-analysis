@@ -253,16 +253,14 @@ class VideoParseService:
 
         video_path: Path | None = None
         # sendVideo 开关关闭时跳过下载，${视频} 占位符渲染为空，仅发送消息模板
-        if (
-            self._config.send_video
-            and has_video_placeholder(self._config, source)
-            and view.video_url
-        ):
-            downloaded = await self._api.download_video(
-                view.video_url, view.title, self._video_dir
-            )
-            if downloaded:
-                video_path, _mime = downloaded
+        if self._config.send_video and has_video_placeholder(self._config, source):
+            video_url = await self._api.fetch_video_url(view, target.page)
+            if video_url:
+                downloaded = await self._api.download_video(
+                    video_url, view.title, self._video_dir
+                )
+                if downloaded:
+                    video_path, _mime = downloaded
         if self._disposed:
             return False
 

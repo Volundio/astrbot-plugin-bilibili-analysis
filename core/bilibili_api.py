@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urlencode, urljoin
 
 import aiohttp
 
@@ -23,9 +23,20 @@ from .link_parser import VideoTarget
 from .logger import PluginLogger, format_error
 from .request_manager import RequestManager
 from .video_file import create_video_file_name
+from .wbi import BilibiliWbi
 
-# 原版固定的解析 API 端点
-PARSE_API_BASE = "https://api.xingzhige.com/API/b_parse/"
+# B 站官方 API（v1.3.0 起为兜底源：主源失败时接管，信息全、含真实分 P；
+# 直链需另走 playurl。数据中心 IP 可能触发 B 站风控，故不作主源）
+VIEW_API = "https://api.bilibili.com/x/web-interface/view"
+PLAYURL_API = "https://api.bilibili.com/x/player/wbi/playurl"
+
+# 第三方解析 API（原版数据源，v1.3.0 起仍为主源：信息与视频直链一次返回。
+# 该服务存在线路不稳、响应慢的间歇性故障，由官方 API 兜底）
+XINGZHIGE_API = "https://api.xingzhige.com/API/b_parse/"
+
+# playurl 请求参数：html5 平台 + fnval=1 取 MP4 直链（durl），
+# 无登录态最高 480p，发群聊场景够用
+PLAYURL_PARAMS = {"qn": "64", "fnval": "1", "platform": "html5", "high_quality": "1"}
 
 # 原版 headers()
 def _json_headers(user_agent: str) -> dict[str, str]:
@@ -93,29 +104,175 @@ class BilibiliApi:
         self._config = config
         self._request_manager = request_manager
         self._logger = logger
+        self._wbi = BilibiliWbi(config, request_manager, logger)
 
-    # ---- 视频信息解析 ----
+    # ---- 视频信息解析（原 API 为主，官方 API 兜底）----
 
     async def fetch_video_view(self, target: VideoTarget) -> BiliVideoView | None:
-        """经外置 API 解析视频信息与视频直链（原版 fetchVideoView）。"""
+        """解析视频信息：原版 API（xingzhige）优先，失败降级 B 站官方 API。"""
+        try:
+            view = await self._fetch_view_xingzhige(target)
+            if view is not None:
+                return view
+        except Exception as error:  # noqa: BLE001 —— 主源失败转兜底源
+            self._logger.warn(f"主源解析失败，转官方 API 兜底：{format_error(error)}")
+
+        try:
+            return await self._fetch_view_official(target)
+        except Exception as error:  # noqa: BLE001 —— 双源全败由上层统一提示
+            self._logger.warn(f"视频信息 API 全部失败：{format_error(error)}")
+            return None
+
+    async def _fetch_view_official(self, target: VideoTarget) -> BiliVideoView | None:
+        """B 站官方 view API（兜底源）。"""
+        id_query = f"bvid={target.bvid}" if target.bvid else f"aid={target.aid}"
+        api_url = f"{VIEW_API}?{id_query}"
+        headers = {
+            **_json_headers(self._config.user_agent),
+            **await self._wbi.cookie_header(),
+        }
+        # view 接口对分 P 返回全部 pages，分 P 号在构造消息与取直链时使用
+        data = await self._request_manager.request(
+            api_url,
+            headers,
+            self._parse_view_response,
+            "视频信息 API(兜底)",
+        )
+        return self._view_from_data(data)
+
+    @staticmethod
+    def _parse_view_response(content: str) -> dict[str, Any] | None:
+        """校验官方 view 响应：code==0 且含 bvid/title 才算成功。
+
+        B 站风控（数据中心 IP 等）会返回 HTML 验证页而非 JSON，
+        此处按解析失败处理，由请求竞速/代理模式兜底。
+        """
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            return None
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return None
+        if not data.get("bvid") or not data.get("title"):
+            return None
+        return data
+
+    def _view_from_data(self, data: dict[str, Any]) -> BiliVideoView:
+        """把官方 view 响应 data 构造为 BiliVideoView。"""
+        stat = data.get("stat") or {}
+        owner = data.get("owner") or {}
+        pages = [
+            {
+                "page": _to_number(page.get("page")),
+                "cid": _to_number(page.get("cid")),
+                "part": str(page.get("part") or ""),
+            }
+            for page in (data.get("pages") or [])
+            if isinstance(page, dict)
+        ]
+        return BiliVideoView(
+            bvid=str(data.get("bvid") or ""),
+            aid=_to_number(data.get("aid")),
+            title=str(data.get("title") or ""),
+            desc=str(data.get("desc") or ""),
+            pic=str(data.get("pic") or ""),
+            duration=_to_number(data.get("duration")),
+            owner=BiliVideoOwner(
+                name=str(owner.get("name") or ""),
+                face=str(owner.get("face") or ""),
+                mid=_to_number(owner.get("mid")),
+            ),
+            stat=BiliVideoStat(
+                view=_to_number(stat.get("view")),
+                like=_to_number(stat.get("like")),
+                coin=_to_number(stat.get("coin")),
+                favorite=_to_number(stat.get("favorite")),
+                share=_to_number(stat.get("share")),
+                danmaku=_to_number(stat.get("danmaku")),
+            ),
+            pages=pages,
+            video_url="",
+        )
+
+    # ---- 视频直链（优先复用兜底源带回的直链，否则官方 playurl）----
+
+    async def fetch_video_url(self, view: BiliVideoView, page: int) -> str | None:
+        """获取视频 MP4 直链：主源（xingzhige）已带回直链则直接用，
+        否则走官方 playurl（html5 平台，无登录最高 480p）。失败返回 None。"""
+        if view.video_url:
+            return view.video_url
+        cid = self._pick_cid(view, page)
+        if not cid:
+            return None
+        params = await self._wbi.signed_params(
+            {"bvid": view.bvid, "cid": str(cid), **PLAYURL_PARAMS}
+        )
+        api_url = f"{PLAYURL_API}?{urlencode(params)}"
+        headers = {
+            **_json_headers(self._config.user_agent),
+            **await self._wbi.cookie_header(),
+        }
+        try:
+            return await self._request_manager.request(
+                api_url,
+                headers,
+                self._parse_playurl_response,
+                "视频直链 API",
+            )
+        except Exception as error:  # noqa: BLE001 —— 直链失败仅降级为不发视频
+            self._logger.warn(f"获取视频直链失败：{format_error(error)}")
+            return None
+
+    @staticmethod
+    def _parse_playurl_response(content: str) -> str | None:
+        """校验 playurl 响应并取出第一条 MP4 直链（durl[0].url）。"""
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            return None
+        data = payload.get("data") or {}
+        durl = data.get("durl")
+        if isinstance(durl, list) and durl:
+            url = str(durl[0].get("url") or "")
+            # 原样使用（durl 直链可能为 http://，B 站 CDN 均可下载，
+            # 与原版行为一致；不做协议假设）
+            if url:
+                return url
+        return None
+
+    @staticmethod
+    def _pick_cid(view: BiliVideoView, page: int) -> int:
+        """按分 P 号取 cid；越界或缺失时回落第一 P。"""
+        for item in view.pages:
+            if item.get("page") == page and item.get("cid"):
+                return int(item["cid"])
+        if view.pages and view.pages[0].get("cid"):
+            return int(view.pages[0]["cid"])
+        return 0
+
+    # ---- 主源：xingzhige b_parse（信息与直链一次返回）----
+
+    async def _fetch_view_xingzhige(self, target: VideoTarget) -> BiliVideoView | None:
+        """经 xingzhige 解析（原版数据源）。响应自带视频直链。"""
         base_url = (
             f"https://www.bilibili.com/video/{target.bvid}"
             if target.bvid
             else f"https://www.bilibili.com/video/av{target.aid}"
         )
         video_url = f"{base_url}?p={target.page}" if target.page > 1 else base_url
-        api_url = f"{PARSE_API_BASE}?url={quote(video_url, safe='')}"
-
+        api_url = f"{XINGZHIGE_API}?url={quote(video_url, safe='')}"
         response = await self._request_manager.request(
             api_url,
             _json_headers(self._config.user_agent),
-            self._parse_external_api_response,
-            "视频解析 API",
+            self._parse_xingzhige_response,
+            "视频解析 API(兜底)",
         )
         data = response.get("data") or {}
-        if not data:
-            return None
-
         video_field = data.get("video") or {}
         stat = data.get("stat") or {}
         owner = data.get("owner") or {}
@@ -137,7 +294,7 @@ class BilibiliApi:
                 coin=_to_number(stat.get("coin")),
                 favorite=_to_number(stat.get("favorite")),
                 share=_to_number(stat.get("share")),
-                # 兼容不同拼写（原版 danmuku ?? danmaku，需区分「键缺失」与「值为 null」）
+                # 兼容不同拼写（原版 danmuku ?? danmaku）
                 danmaku=_to_number(
                     stat.get("danmuku")
                     if stat.get("danmuku") is not None
@@ -145,12 +302,13 @@ class BilibiliApi:
                 ),
             ),
             pages=[],
+            # 兜底源自带直链，fetch_video_url 直接复用，免去一次 playurl 请求
             video_url=str(video_field.get("url") or ""),
         )
 
     @staticmethod
-    def _parse_external_api_response(content: str) -> dict[str, Any] | None:
-        """只有结构完整且可用的响应才能作为竞速的成功结果（原版同名方法）。"""
+    def _parse_xingzhige_response(content: str) -> dict[str, Any] | None:
+        """只有结构完整且可用的响应才能作为竞速的成功结果（原版校验逻辑）。"""
         try:
             response = json.loads(content)
         except (json.JSONDecodeError, TypeError):
@@ -160,11 +318,10 @@ class BilibiliApi:
         data = response.get("data")
         if not isinstance(data, dict):
             return None
-        bvid = data.get("bvid")
-        aid = _to_number(data.get("aid"))
         video_field = data.get("video") or {}
-        title = data.get("title") or video_field.get("title")
-        if not bvid or not aid or not title:
+        if not data.get("bvid") or not data.get("title"):
+            return None
+        if not video_field.get("url"):
             return None
         return response
 

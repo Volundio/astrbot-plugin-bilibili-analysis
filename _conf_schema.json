@@ -72,7 +72,7 @@
     "default": true
   },
   "requestMode": {
-    "description": "解析 API 请求模式",
+    "description": "API 请求模式",
     "type": "string",
     "options": ["proxy", "direct", "parallel"],
     "default": "parallel"

@@ -417,12 +417,53 @@ def test_video_file(core):
 
 def test_bilibili_api_parse(core):
     print("[bilibili_api]")
-    parse = core.bilibili_api.BilibiliApi._parse_external_api_response
-    ok = parse('{"code":0,"data":{"bvid":"BV1xx","aid":1,"title":"t","video":{"url":"u"}}}')
-    check("合法响应通过", ok is not None)
-    check("code 非 0 拒绝", parse('{"code":404,"data":{"bvid":"x","aid":1,"title":"t"}}') is None)
-    check("缺 bvid 拒绝", parse('{"code":0,"data":{"aid":1,"title":"t"}}') is None)
-    check("坏 JSON 拒绝", parse("not json") is None)
+    api = core.bilibili_api.BilibiliApi
+    parse_view = api._parse_view_response
+    view_ok = parse_view(
+        '{"code":0,"data":{"bvid":"BV1xx","aid":1,"title":"t","pic":"p"}}'
+    )
+    check("view 合法响应通过", view_ok is not None and view_ok["bvid"] == "BV1xx")
+    check("view code 非 0 拒绝", parse_view('{"code":-404,"message":"啥都木有"}') is None)
+    check("view 缺标题拒绝", parse_view('{"code":0,"data":{"bvid":"x","aid":1}}') is None)
+    check("view 风控 HTML 拒绝", parse_view("<html>出错啦</html>") is None)
+
+    parse_url = api._parse_playurl_response
+    url_ok = parse_url('{"code":0,"data":{"durl":[{"url":"http://upos.example/v.mp4"}]}}')
+    check("playurl 原样取直链", url_ok == "http://upos.example/v.mp4")
+    check("playurl 无 durl 拒绝", parse_url('{"code":0,"data":{}}') is None)
+    check("playurl code 非 0 拒绝", parse_url('{"code":-404}') is None)
+
+    parse_fallback = api._parse_xingzhige_response
+    fb_ok = parse_fallback(
+        '{"code":0,"data":{"bvid":"BV1xx","aid":1,"title":"t",'
+        '"video":{"url":"https://cdn/v.mp4"}}}'
+    )
+    check("兜底源合法响应通过", fb_ok is not None)
+    check("兜底源缺直链拒绝", parse_fallback(
+        '{"code":0,"data":{"bvid":"BV1xx","aid":1,"title":"t"}}') is None)
+    check("兜底源 code 非 0 拒绝", parse_fallback('{"code":-404}') is None)
+
+    # 分 P → cid 选择
+    view = core.bilibili_api.BiliVideoView(
+        bvid="BV1xx",
+        pages=[{"page": 1, "cid": 111}, {"page": 2, "cid": 222}],
+    )
+    check("按分 P 取 cid", api._pick_cid(view, 2) == 222)
+    check("越界分 P 回落第一 P", api._pick_cid(view, 9) == 111)
+    check("无分 P 返回 0", api._pick_cid(core.bilibili_api.BiliVideoView(bvid="x"), 1) == 0)
+
+
+def test_wbi_sign():
+    print("[wbi]")
+    wbi_mod = sys.modules["plugin_under_test.core.wbi"]
+    img_key = "7cd084941338484aae1ad9425b84077c"
+    sub_key = "4932caff0ff746eab6f01bf08b70ac45"
+    signed = wbi_mod.sign_wbi({"bvid": "BV1xx", "cid": "111"}, img_key, sub_key)
+    check("签名含 32 位 w_rid", len(signed.get("w_rid", "")) == 32)
+    check("签名含 wts", "wts" in signed)
+    check("mixin key 32 位", len(wbi_mod.mixin_key(img_key + sub_key)) == 32)
+    check("从 URL 提取 key", wbi_mod._key_from_url(
+        f"https://i0.hdslb.com/bfs/wbi/{img_key}.png") == img_key)
 
 
 def test_search_removed(core):
@@ -522,6 +563,7 @@ def main() -> int:
         video_formatter=sys.modules["plugin_under_test.core.video_formatter"],
         video_file=sys.modules["plugin_under_test.core.video_file"],
         bilibili_api=sys.modules["plugin_under_test.core.bilibili_api"],
+        wbi=sys.modules["plugin_under_test.core.wbi"],
         message_components=sys.modules["astrbot.api.message_components"],
     )
 
@@ -531,6 +573,7 @@ def main() -> int:
     test_video_formatter(core)
     test_video_file(core)
     test_bilibili_api_parse(core)
+    test_wbi_sign()
     test_search_removed(core)
     test_logger_format_error()
     test_rate_limiter_sync()
