@@ -20,7 +20,7 @@ from astrbot.api.message_components import (
 )
 
 from .config import PluginConfig
-from .logger import PluginLogger
+from .logger import PluginLogger, format_error
 
 SUPPORTED_PLATFORM = "aiocqhttp"
 
@@ -43,7 +43,9 @@ async def send_plain(event: AstrMessageEvent, text: str) -> None:
     await event.send(MessageChain(chain=[Plain(text=text)]))
 
 
-async def send_wait_tip(event: AstrMessageEvent, text: str) -> int | None:
+async def send_wait_tip(
+    event: AstrMessageEvent, text: str, logger: PluginLogger
+) -> int | None:
     """发送等待提示，aiocqhttp 下返回 message_id 以便解析完成后撤回。"""
     if not is_supported_platform(event):
         await send_plain(event, text)
@@ -62,8 +64,8 @@ async def send_wait_tip(event: AstrMessageEvent, text: str) -> int | None:
         message_id = result.get("message_id") if isinstance(result, dict) else None
         return int(message_id) if message_id is not None else None
     except Exception as error:  # 平台调用失败时降级为普通发送
+        logger.warn(f"等待提示经 OneBot API 发送失败：{format_error(error)}")
         await send_plain(event, text)
-        del error
         return None
 
 
@@ -107,7 +109,7 @@ async def send_parsed_messages(
             await event.send(MessageChain(chain=[nodes]))
             return True
         except Exception as error:
-            logger.warn(f"合并转发发送失败，降级为逐条发送：{error}")
+            logger.warn(f"合并转发发送失败，降级为逐条发送：{format_error(error)}")
 
     for message in messages:
         if is_disposed():

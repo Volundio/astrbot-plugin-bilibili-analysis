@@ -20,7 +20,7 @@ import aiohttp
 
 from .config import PluginConfig
 from .link_parser import VideoTarget
-from .logger import PluginLogger
+from .logger import PluginLogger, format_error
 from .request_manager import RequestManager
 from .video_file import create_video_file_name
 
@@ -192,7 +192,7 @@ class BilibiliApi:
                 match = re.search(r"""https?://[^"'<\s]+""", text, re.IGNORECASE)
                 return match.group(0) if match else None
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-            self._logger.debug(f"短链解析失败：{error}")
+            self._logger.debug(f"短链解析失败：{format_error(error)}")
             return None
 
     # ---- 视频下载 ----
@@ -206,7 +206,9 @@ class BilibiliApi:
         """
         max_mb = self._config.max_file_size_mb
         max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else 0
-        timeout = aiohttp.ClientTimeout(total=120)
+        # sock_read：单次读超时 30s，直链 CDN 停滞时尽早失败而非干等总超时
+        timeout = aiohttp.ClientTimeout(total=120, sock_read=30)
+        self._logger.debug(f"开始下载视频：{url}（上限 {max_mb}MB）")
         try:
             async with self._request_manager.session.get(
                 url,
@@ -218,7 +220,9 @@ class BilibiliApi:
                 timeout=timeout,
             ) as response:
                 if response.status < 200 or response.status >= 300:
-                    self._logger.warn(f"下载视频失败：HTTP {response.status}")
+                    self._logger.warn(
+                        f"下载视频失败：HTTP {response.status}（{url}）"
+                    )
                     return None
 
                 content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
@@ -239,7 +243,10 @@ class BilibiliApi:
                     response, max_bytes, max_mb, title, mime, dest_dir
                 )
         except Exception as error:  # noqa: BLE001 —— 对齐原版 catch-all：网络/超时/磁盘 IO 异常均降级为跳过
-            self._logger.warn(f"下载视频失败：{error}")
+            import traceback
+
+            self._logger.warn(f"下载视频失败：{format_error(error)}（{url}）")
+            self._logger.debug(f"下载视频失败堆栈：\n{traceback.format_exc()}")
             return None
 
     async def _read_video_body(

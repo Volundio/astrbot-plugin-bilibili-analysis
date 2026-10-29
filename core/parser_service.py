@@ -19,7 +19,7 @@ from astrbot.api.event import AstrMessageEvent
 from .bilibili_api import BilibiliApi, BiliVideoView
 from .config import PluginConfig
 from .link_parser import ShortTarget, VideoTarget, target_from_resolved_url
-from .logger import PluginLogger
+from .logger import PluginLogger, format_error
 from . import message_sender
 from .message_sender import send_parsed_messages, send_wait_tip, recall_message
 from .rate_limiter import VideoRateLimiter
@@ -238,7 +238,7 @@ class VideoParseService:
         try:
             view = await self._api.fetch_video_view(target)
         except Exception as error:
-            self._logger.warn(f"请求视频解析 API 失败：{error}")
+            self._logger.warn(f"请求视频解析 API 失败：{format_error(error)}")
         finally:
             await recall_message(event, wait_tip_id)
 
@@ -304,7 +304,7 @@ class VideoParseService:
         if self._disposed or not self._config.wait_tip:
             return None
         try:
-            return await send_wait_tip(event, self._config.wait_tip)
+            return await send_wait_tip(event, self._config.wait_tip, self._logger)
         except Exception:
             return None
 

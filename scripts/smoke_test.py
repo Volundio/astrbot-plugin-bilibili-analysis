@@ -432,6 +432,17 @@ def test_search_removed(core):
           not os.path.exists(PLUGIN_ROOT / "core" / "search.py"))
 
 
+def test_logger_format_error():
+    """回归：TimeoutError 等空消息异常不得再产生空白日志。"""
+    print("[logger]")
+    logger_mod = sys.modules["plugin_under_test.core.logger"]
+    fmt = logger_mod.format_error
+    check("空消息异常输出类型名", fmt(TimeoutError()) == "TimeoutError")
+    check("带消息异常输出 类型: 消息",
+          fmt(RuntimeError("boom")) == "RuntimeError: boom")
+    check("空字符串消息异常输出类型名", fmt(ValueError("")) == "ValueError")
+
+
 def test_rate_limiter_sync():
     """rate_limiter 需要事件循环（call_later），用 asyncio 驱动。"""
     print("[rate_limiter]")
@@ -521,6 +532,7 @@ def main() -> int:
     test_video_file(core)
     test_bilibili_api_parse(core)
     test_search_removed(core)
+    test_logger_format_error()
     test_rate_limiter_sync()
     test_main_import(plugin)
 

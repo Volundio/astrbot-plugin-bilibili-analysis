@@ -15,7 +15,7 @@ from typing import TypeVar
 import aiohttp
 
 from .config import PluginConfig
-from .logger import PluginLogger
+from .logger import PluginLogger, format_error
 
 # 原版 APIFOX_PROXY_URL
 APIFOX_PROXY_URL = "https://web-proxy.apifox.cn/api/v1/request"
@@ -26,7 +26,8 @@ Parser = Callable[[str], T | None]
 
 
 def _error_message(error: BaseException) -> str:
-    return str(error) or type(error).__name__
+    # TimeoutError 等异常 str() 为空，统一走 format_error 补类型名
+    return format_error(error)
 
 
 class RequestManager:
