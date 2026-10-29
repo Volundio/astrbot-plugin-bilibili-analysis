@@ -275,7 +275,7 @@ def test_config(core):
     check("默认卡片模板与通用同布局",
           cfg.card_template == cfg.link_template)
     check("缺省卡片模板取 schema 默认",
-          cfg.effective_card_template == core.config.DEFAULT_CARD_TEMPLATE)
+          cfg.effective_card_template == core.config.DEFAULT_CARD_TEMPLATE.strip())
     check("parse_limit 默认 3", cfg.parse_limit == 3)
     check("四种来源默认全开",
           cfg.video_parse_mode == ("card", "link", "short", "id"))
