@@ -256,8 +256,12 @@ class VideoParseService:
         if self._config.send_video and has_video_placeholder(self._config, source):
             video_url = await self._api.fetch_video_url(view, target.page)
             if video_url:
+                # 文件名用视频号（纯 ASCII）：合并转发节点内的视频由协议端
+                # 按 file:// 路径直接读取，含 emoji/中文的标题文件名在协议端
+                # 解码不可靠（realpath ENOENT）
+                file_stem = view.bvid or f"av{view.aid}"
                 downloaded = await self._api.download_video(
-                    video_url, view.title, self._video_dir
+                    video_url, file_stem, self._video_dir
                 )
                 if downloaded:
                     video_path, _mime = downloaded
