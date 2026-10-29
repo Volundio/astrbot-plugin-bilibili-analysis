@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 
+from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Json
 from astrbot.api.star import Context, Star, StarTools, register
@@ -68,8 +69,11 @@ def _parse_point_args(raw: str) -> tuple[str, int]:
     "1.0.0",
 )
 class BilibiliAnalysisPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
+        # AstrBot 实例化插件时按 __init__ 签名注入配置（无 schema 的旧版本
+        # 会回退为只传 context），此处显式存储并保留空配置兜底
+        self.config = config if config is not None else {}
         self._config = PluginConfig.from_user_config(self.config)
         self._logger = PluginLogger(self._config.debug_log)
 

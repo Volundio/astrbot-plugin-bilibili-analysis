@@ -29,6 +29,13 @@ def _build_astrbot_mock() -> None:
     astrbot = types.ModuleType("astrbot")
     api = types.ModuleType("astrbot.api")
 
+    # astrbot.api.AstrBotConfig（dict 子类的简化 stub）
+    class AstrBotConfig(dict):
+        pass
+
+    astrbot.AstrBotConfig = AstrBotConfig
+    api.AstrBotConfig = AstrBotConfig
+
     # astrbot.api.logger
     api_logger = types.ModuleType("astrbot.api.logger")
     logging.basicConfig(level=logging.DEBUG, format="[mock] %(message)s")
@@ -459,6 +466,25 @@ def test_main_import(plugin):
     check("插件类已注册", hasattr(plugin, "BilibiliAnalysisPlugin"))
     check("插件类含监听器", hasattr(plugin.BilibiliAnalysisPlugin, "on_message"))
     check("插件类含点播指令", hasattr(plugin.BilibiliAnalysisPlugin, "bilibili_point"))
+
+    # 复现 AstrBot 实例化路径：plugin_cls(context=..., config=...)；
+    # 回归验证 'BilibiliAnalysisPlugin' object has no attribute 'config' 的问题
+    try:
+        obj = plugin.BilibiliAnalysisPlugin(
+            context=None,
+            config={"demand": True, "enablebilianalysis": False},
+        )
+        ok = obj.config.get("demand") is True and obj._config.demand is True
+        check("带 config 实例化成功且配置生效", ok)
+    except Exception as error:  # noqa: BLE001
+        check("带 config 实例化成功且配置生效", False, str(error))
+
+    try:
+        obj_fallback = plugin.BilibiliAnalysisPlugin(context=None)
+        check("无 config 回退实例化成功（空配置兜底）",
+              obj_fallback._config.enablebilianalysis is True)
+    except Exception as error:  # noqa: BLE001
+        check("无 config 回退实例化成功（空配置兜底）", False, str(error))
 
 
 def main() -> int:
