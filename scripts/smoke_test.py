@@ -274,6 +274,10 @@ def test_config(core):
     cfg3 = core.config.PluginConfig.from_user_config({"parseLimit": "abc"})
     check("非法数字容错", cfg3.parse_limit == 3)
 
+    check("默认发送视频", cfg.send_video is True)
+    cfg5 = core.config.PluginConfig.from_user_config({"sendVideo": False})
+    check("sendVideo 关闭归一", cfg5.send_video is False)
+
     # 旧版本配置迁移：link/card 旧值按新语义（link 仅完整链接）解释
     cfg4 = core.config.PluginConfig.from_user_config({"videoParseMode": ["link", "card"]})
     check("旧配置来源按新语义解释",

@@ -51,6 +51,11 @@
     "type": "int",
     "default": 50
   },
+  "sendVideo": {
+    "description": "下载并发送视频",
+    "type": "bool",
+    "default": true
+  },
   "isfigure": {
     "description": "开启合并转发",
     "type": "bool",

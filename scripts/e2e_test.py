@@ -275,6 +275,35 @@ async def run_tests() -> int:
     await asyncio.wait_for(service._queue.join(), timeout=15)
     check("间隔内重复链接不重复发送", len(event2.sent) == 0)
 
+    # 用例 2b：sendVideo 关闭 → 不下载、${视频} 渲染为空，仅发模板图文
+    mp4_count_before = len(list(video_dir.glob("*.mp4")))
+    service2b, rm2b = await make_service(sendVideo=False)
+    event2b = MockEvent("https://www.bilibili.com/video/BV1GOODVIDEO?p=7")
+    service2b.enqueue(event2b, lp_mod.parse_bilibili_content(event2b.message_str), "link")
+    await asyncio.wait_for(service2b._queue.join(), timeout=15)
+    check("sendVideo 关闭仍发送模板消息", len(event2b.sent) >= 1)
+    video_comps_2b = [
+        c for chain in event2b.sent for c in chain.chain
+        if type(c).__name__ == "Video"
+    ] + [
+        comp for chain in event2b.sent
+        for c in chain.chain if type(c).__name__ == "Nodes"
+        for node in c.nodes for comp in node.content
+        if type(comp).__name__ == "Video"
+    ]
+    check("sendVideo 关闭无视频组件", len(video_comps_2b) == 0)
+    image_comps_2b = [
+        comp for chain in event2b.sent
+        for c in chain.chain if type(c).__name__ == "Nodes"
+        for node in c.nodes for comp in node.content
+        if type(comp).__name__ == "Image"
+    ]
+    check("sendVideo 关闭封面照常发送", len(image_comps_2b) >= 1)
+    check("sendVideo 关闭未新增下载",
+          len(list(video_dir.glob("*.mp4"))) == mp4_count_before)
+    await service2b.close()
+    await rm2b.close()
+
     # 用例 3：不存在的视频 + showError
     service3, rm3 = await make_service(showError=True, loggerinfo=True)
     event3 = MockEvent("https://www.bilibili.com/video/BV1MISSING00")

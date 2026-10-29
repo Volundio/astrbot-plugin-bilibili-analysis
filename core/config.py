@@ -96,6 +96,7 @@ class PluginConfig:
 
     # 视频下载限制
     max_file_size_mb: int = 50  # 0 表示不限制
+    send_video: bool = True  # 关闭后仅发送消息模板，不下载/发送视频
 
     # 合并转发
     use_figure: bool = True
@@ -159,6 +160,7 @@ class PluginConfig:
             use_numeral=_as_bool(raw.get("useNumeral"), True),
             video_id_preference=id_pref,
             max_file_size_mb=_as_int(raw.get("MaximumFileSizeMB"), 50, minimum=0),
+            send_video=_as_bool(raw.get("sendVideo"), True),
             use_figure=_as_bool(raw.get("isfigure"), True),
             min_interval_s=_as_int(raw.get("MinimumTimeInterval"), 180, minimum=1),
             user_rate_limit=_as_bool(raw.get("preventSingleUserListAttack"), True),
