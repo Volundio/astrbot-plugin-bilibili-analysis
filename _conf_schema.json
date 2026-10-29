@@ -23,12 +23,12 @@
   "bVideo_area": {
     "description": "通用消息模板",
     "type": "text",
-    "default": "📺 ${标题}\n👤 ${UP主}\n👍 ${点赞} ${tab} 🪙 ${投币} ${tab} ⭐ ${收藏}\n👀 ${观看} ${tab} 💬 ${弹幕} ${tab} 🔁 ${转发}\n📝 ${简介}\n\n🔗 ${视频地址}\n▶️ ${播放链接}\n${封面}\n${视频}"
+    "default": " ${标题}\n👤 ${UP主}\n\n👍 ${点赞} ${tab} 🪙 ${投币} ${tab} ⭐ ${收藏}\n👀 ${观看} ${tab} 💬 ${弹幕} ${tab} 🔁 ${转发}\n\n ${简介}\n\n🔗 ${视频地址}\n\n▶️ ${播放链接}\n\n${封面}\n${视频}"
   },
   "bVideoCard_area": {
     "description": "卡片消息模板",
     "type": "text",
-    "default": "📺 ${标题}\n👤 ${UP主}\n👍 ${点赞} ${tab} 🪙 ${投币} ${tab} ⭐ ${收藏}\n👀 ${观看} ${tab} 💬 ${弹幕} ${tab} 🔁 ${转发}\n📝 ${简介}\n\n🔗 ${视频地址}\n▶️ ${播放链接}\n${封面}\n${视频}"
+    "default": " ${标题}\n👤 ${UP主}\n\n👍 ${点赞} ${tab} 🪙 ${投币} ${tab} ⭐ ${收藏}\n👀 ${观看} ${tab} 💬 ${弹幕} ${tab} 🔁 ${转发}\n\n ${简介}\n\n🔗 ${视频地址}\n\n▶️ ${播放链接}\n\n${封面}\n${视频}"
   },
   "bVideoShowIntroductionTofixed": {
     "description": "简介最大字符数",

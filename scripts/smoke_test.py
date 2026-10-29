@@ -270,7 +270,7 @@ def test_config(core):
     cfg = core.config.PluginConfig.from_user_config({})
     check("默认开启解析", cfg.enablebilianalysis)
     check("默认模板含视频占位符", "${视频}" in cfg.link_template)
-    check("默认模板为 emoji 风格", "📺" in cfg.link_template and "👍" in cfg.link_template)
+    check("默认模板为 emoji 风格", "👍" in cfg.link_template and "🪙" in cfg.link_template)
     check("默认模板含视频地址跳转", "🔗 ${视频地址}" in cfg.link_template)
     check("默认卡片模板与通用同布局",
           cfg.card_template == cfg.link_template)
