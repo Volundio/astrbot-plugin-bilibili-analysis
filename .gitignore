@@ -1,0 +1,45 @@
+# Python 字节码与构建产物
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 测试 / 类型检查 / 覆盖率缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE 与编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志与运行时数据（AstrBot 插件数据、下载的视频缓存等）
+*.log
+data/
+*.mp4
+*.webm
+*.flv
+
+# 本地临时文件
+*.tmp
+*.bak
+
+old/
+docs/

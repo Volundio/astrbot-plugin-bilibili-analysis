@@ -1,0 +1,4 @@
+# 依赖说明：
+# 本插件仅使用 AstrBot 自带依赖（aiohttp 等），无需额外安装第三方库。
+# aiohttp 由 AstrBot 核心提供，此处显式声明以兼容插件的离线安装校验。
+aiohttp>=3.9
