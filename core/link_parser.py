@@ -51,11 +51,18 @@ _SCHEME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 @dataclass(frozen=True)
 class VideoTarget:
-    """已确定视频号的目标（old/src/link-parser.ts ResolvedVideoTarget）。"""
+    """已确定视频号的目标（old/src/link-parser.ts ResolvedVideoTarget）。
+
+    origin 记录目标在消息中的出现形态，供来源白名单过滤：
+    - "link"：完整视频页链接（bilibili.com/video/…）
+    - "short"：短链域名直带的 BV/AV 号（如 b23.tv/BV1xx…）
+    - "id"：消息中独立出现的 BV/AV 号（不属于任何 URL）
+    """
 
     bvid: str | None = None
     aid: str | None = None
     page: int = 1
+    origin: str = "link"
 
     @property
     def key(self) -> str:
@@ -77,6 +84,13 @@ class ShortTarget:
 
 
 BilibiliTarget = VideoTarget | ShortTarget
+
+
+def target_origin(target: BilibiliTarget) -> str:
+    """返回目标的来源形态：card 由消息级判定，其余为 link / short / id。"""
+    if isinstance(target, ShortTarget):
+        return "short"
+    return target.origin
 
 
 def _normalize_id(raw_id: str) -> str | None:
@@ -111,13 +125,15 @@ def _parse_page_from_query(query: str) -> int:
     return _parse_page(parse_qs(query))
 
 
-def _create_video_target(raw_id: str, page: int) -> VideoTarget | None:
+def _create_video_target(
+    raw_id: str, page: int, origin: str = "link"
+) -> VideoTarget | None:
     normalized = _normalize_id(raw_id)
     if not normalized:
         return None
     if normalized.startswith("av"):
-        return VideoTarget(aid=normalized[2:], page=page)
-    return VideoTarget(bvid=normalized, page=page)
+        return VideoTarget(aid=normalized[2:], page=page, origin=origin)
+    return VideoTarget(bvid=normalized, page=page, origin=origin)
 
 
 def _parse_bilibili_url(raw_url: str) -> BilibiliTarget | None:
@@ -207,12 +223,13 @@ def parse_bilibili_content(
     for match in _URL_PATTERN.finditer(normalized):
         push_target(_parse_bilibili_url(_clean_url(match.group(0))))
 
-    # 第二轮：短链；短链 code 本身形如 BV/av 号时直接当视频目标（原版行为）
+    # 第二轮：短链；短链 code 本身形如 BV/av 号时直接当视频目标（原版行为），
+    # 其来源形态仍按短链计（消息中出现的是短链域名）
     for match in _SHORT_PATTERN.finditer(normalized):
         tail = normalized[match.end():]
         query_match = _SHORT_QUERY_PATTERN.match(tail)
         page = _parse_page_from_query(query_match.group(1) if query_match else "")
-        direct = _create_video_target(match.group(2), page)
+        direct = _create_video_target(match.group(2), page, origin="short")
         if direct:
             push_target(direct)
         else:
@@ -223,7 +240,7 @@ def parse_bilibili_content(
         for match in _STANDALONE_PATTERN.finditer(normalized):
             normalized_id = _normalize_id(match.group(1))
             if normalized_id and normalized_id not in seen_video_ids:
-                push_target(_create_video_target(normalized_id, 1))
+                push_target(_create_video_target(normalized_id, 1, origin="id"))
 
     return list(targets.values())
 

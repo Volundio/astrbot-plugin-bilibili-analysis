@@ -190,9 +190,13 @@ class VideoParseService:
         if resolved is None:
             self._logger.debug(f"短链目标不是普通视频：{url}")
             return False
-        # 原版 resolved.page = resolved.page || target.page（parse_page 恒 ≥1，保真照搬）
+        # 原版 resolved.page = resolved.page || target.page（parse_page 恒 ≥1，保真照搬）；
+        # 短链跳转所得目标保留短链来源标记
         resolved = VideoTarget(
-            bvid=resolved.bvid, aid=resolved.aid, page=resolved.page or target.page
+            bvid=resolved.bvid,
+            aid=resolved.aid,
+            page=resolved.page or target.page,
+            origin="short",
         )
         return await self._process_one_target(event, resolved, source)
 

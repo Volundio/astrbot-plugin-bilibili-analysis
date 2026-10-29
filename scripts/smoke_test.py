@@ -257,9 +257,12 @@ def test_config(core):
     cfg = core.config.PluginConfig.from_user_config({})
     check("默认开启解析", cfg.enablebilianalysis)
     check("默认模板含视频占位符", "${视频}" in cfg.link_template)
+    check("默认模板为 emoji 风格", "📺" in cfg.link_template and "👍" in cfg.link_template)
     check("缺省卡片模板取 schema 默认",
           cfg.effective_card_template == core.config.DEFAULT_CARD_TEMPLATE)
     check("parse_limit 默认 3", cfg.parse_limit == 3)
+    check("四种来源默认全开",
+          cfg.video_parse_mode == ("card", "link", "short", "id"))
 
     cfg2 = core.config.PluginConfig.from_user_config(
         {"bVideoCard_area": "", "requestMode": "hacker", "videoParseMode": "card"}
@@ -271,6 +274,11 @@ def test_config(core):
     cfg3 = core.config.PluginConfig.from_user_config({"parseLimit": "abc"})
     check("非法数字容错", cfg3.parse_limit == 3)
 
+    # 旧版本配置迁移：link/card 旧值按新语义（link 仅完整链接）解释
+    cfg4 = core.config.PluginConfig.from_user_config({"videoParseMode": ["link", "card"]})
+    check("旧配置来源按新语义解释",
+          cfg4.video_parse_mode == ("link", "card"))
+
 
 def test_link_parser(core):
     print("[link_parser]")
@@ -279,6 +287,7 @@ def test_link_parser(core):
     t = lp.parse_bilibili_content("看这个 https://www.bilibili.com/video/BV1GJ411x7h7")
     check("普通 BV 链接", len(t) == 1 and isinstance(t[0], lp.VideoTarget)
           and t[0].bvid == "BV1GJ411x7h7" and t[0].page == 1)
+    check("完整链接来源标记", t and lp.target_origin(t[0]) == "link")
 
     t = lp.parse_bilibili_content("https://www.bilibili.com/video/BV1GJ411x7h7?p=3")
     check("分 P 参数", t and t[0].page == 3)
@@ -296,15 +305,19 @@ def test_link_parser(core):
     t = lp.parse_bilibili_content("分享 https://b23.tv/abcd1234 给你")
     check("b23.tv 短链", t and isinstance(t[0], lp.ShortTarget)
           and t[0].host == "b23.tv" and t[0].code == "abcd1234")
+    check("短链来源标记", t and lp.target_origin(t[0]) == "short")
 
     t = lp.parse_bilibili_content("https://b23.tv/BV1GJ411x7h7")
     check("短链 code 为 BV 号直接解析", t and isinstance(t[0], lp.VideoTarget))
+    check("短链直带 BV 的来源仍为 short", t and lp.target_origin(t[0]) == "short")
 
     t = lp.parse_bilibili_content("哈喽 BV1GJ411x7h7 好看")
     check("独立 BV 号", t and t[0].bvid == "BV1GJ411x7h7")
+    check("独立 BV 号来源标记", t and lp.target_origin(t[0]) == "id")
 
     t = lp.parse_bilibili_content("推荐 av170001。")
     check("独立 av 号", t and t[0].aid == "170001")
+    check("独立 av 号来源标记", t and lp.target_origin(t[0]) == "id")
     # 原版 standalone 断言字符集不含全角感叹号，保真：不应匹配
     t = lp.parse_bilibili_content("推荐 av170001！")
     check("av 号后跟！不匹配（保真）", len(t) == 0)
@@ -405,22 +418,11 @@ def test_bilibili_api_parse(core):
     check("坏 JSON 拒绝", parse("not json") is None)
 
 
-def test_search_sign(core):
-    print("[search]")
-    sign = core.search.BilibiliSearchApi._sign_wbi
-    img_key = "7cd084941338484aae1ad9425b84077c"
-    sub_key = "4932caff0ff746eab6f01bf08b70ac45"
-    signed = sign({"keyword": "测试", "search_type": "video"}, img_key, sub_key)
-    check("签名含 w_rid 且 32 位", len(signed.get("w_rid", "")) == 32)
-    check("签名含 wts", "wts" in signed)
-    mixin = core.search.BilibiliSearchApi._mixin_key(img_key + sub_key)
-    check("mixin key 为 32 位", len(mixin) == 32)
-    key = core.search.BilibiliSearchApi._key_from_url(
-        "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png"
-    )
-    check("从 URL 提取 key", key == img_key)
-    check("标题高亮清除", core.search.BilibiliSearchApi._strip_highlight(
-        '<em class="keyword">测试</em>视频') == "测试视频")
+def test_search_removed(core):
+    print("[search 已移除]")
+    import os
+    check("core/search.py 文件已删除",
+          not os.path.exists(PLUGIN_ROOT / "core" / "search.py"))
 
 
 def test_rate_limiter_sync():
@@ -469,16 +471,16 @@ def test_main_import(plugin):
     print("[main]")
     check("插件类已注册", hasattr(plugin, "BilibiliAnalysisPlugin"))
     check("插件类含监听器", hasattr(plugin.BilibiliAnalysisPlugin, "on_message"))
-    check("插件类含点播指令", hasattr(plugin.BilibiliAnalysisPlugin, "bilibili_point"))
+    check("点播指令已移除", not hasattr(plugin.BilibiliAnalysisPlugin, "bilibili_point"))
 
     # 复现 AstrBot 实例化路径：plugin_cls(context=..., config=...)；
     # 回归验证 'BilibiliAnalysisPlugin' object has no attribute 'config' 的问题
     try:
         obj = plugin.BilibiliAnalysisPlugin(
             context=None,
-            config={"demand": True, "enablebilianalysis": False},
+            config={"enablebilianalysis": False},
         )
-        ok = obj.config.get("demand") is True and obj._config.demand is True
+        ok = obj._config.enablebilianalysis is False
         check("带 config 实例化成功且配置生效", ok)
     except Exception as error:  # noqa: BLE001
         check("带 config 实例化成功且配置生效", False, str(error))
@@ -502,7 +504,6 @@ def main() -> int:
         video_formatter=sys.modules["plugin_under_test.core.video_formatter"],
         video_file=sys.modules["plugin_under_test.core.video_file"],
         bilibili_api=sys.modules["plugin_under_test.core.bilibili_api"],
-        search=sys.modules["plugin_under_test.core.search"],
         message_components=sys.modules["astrbot.api.message_components"],
     )
 
@@ -512,7 +513,7 @@ def main() -> int:
     test_video_formatter(core)
     test_video_file(core)
     test_bilibili_api_parse(core)
-    test_search_sign(core)
+    test_search_removed(core)
     test_rate_limiter_sync()
     test_main_import(plugin)
 
