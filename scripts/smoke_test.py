@@ -146,9 +146,13 @@ def _build_astrbot_mock() -> None:
         pass
 
     class Star:
+        """对齐真实基类 astrbot/core/star/base.py：
+        接受 config 参数但【不】存储 —— 插件必须自己声明并赋值 self.config。
+        这样若插件代码直接读 self.config 而未存储，测试会像真实环境一样报错。
+        """
+
         def __init__(self, context=None, config=None):
-            self.context = context
-            self.config = config or {}
+            self.context = context  # noqa: ARG002 —— 故意不存储 config
 
     class StarTools:
         @staticmethod
@@ -483,6 +487,8 @@ def test_main_import(plugin):
         obj_fallback = plugin.BilibiliAnalysisPlugin(context=None)
         check("无 config 回退实例化成功（空配置兜底）",
               obj_fallback._config.enablebilianalysis is True)
+        # mock Star 基类不存储 config，无参实例化时 self.config 必须仍是插件自存的空 dict
+        check("config 兜底为空 dict 而非基类属性", obj_fallback.config == {})
     except Exception as error:  # noqa: BLE001
         check("无 config 回退实例化成功（空配置兜底）", False, str(error))
 

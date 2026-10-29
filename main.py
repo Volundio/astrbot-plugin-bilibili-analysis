@@ -15,7 +15,7 @@ import re
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Json
-from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.util import SessionController, session_waiter
 
 try:  # GreedyStr 未在 api 层导出，此处兼容导入，失败则降级为普通 str
@@ -62,12 +62,8 @@ def _parse_point_args(raw: str) -> tuple[str, int]:
     return keyword, page
 
 
-@register(
-    "astrbot_plugin_bilibili_analysis",
-    "AstrBotDevs",
-    "B 站视频链接解析与点播（移植自 koishi-plugin-bilibili-videolink-analysis，仅支持 QQ）",
-    "1.0.0",
-)
+# 插件元数据（name/author/desc/version/repo）统一由 metadata.yaml 提供；
+# @register 装饰器自 AstrBot v3.5.19 起已废弃，Star 子类会被自动识别加载
 class BilibiliAnalysisPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
