@@ -2,7 +2,7 @@
 
 本插件版本遵循[语义化版本](https://semver.org/lang/zh-CN/)，记录格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [1.0.0] - 2026-10-30
+## [1.3.3] - 2026-10-30
 
 初始发布。B 站视频链接解析插件，移植自 [koishi-plugin-bilibili-videolink-analysis](https://www.npmjs.com/package/koishi-plugin-bilibili-videolink-analysis)。
 

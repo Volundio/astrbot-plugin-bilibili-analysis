@@ -1,5 +1,5 @@
 name: astrbot_plugin_bilibili_analysis
 desc: Bilibili 视频链接解析，支持完整链接、b23.tv 短链、独立 BV/AV 号与 QQ 分享卡片四种来源，可发送视频、合并转发。移植自 koishi-plugin-bilibili-videolink-analysis。
 author: Volundio
-version: 1.0.0
+version: 1.3.3
 repo: https://github.com/Volundio/astrbot-plugin-bilibili-analysis
