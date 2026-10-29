@@ -17,6 +17,7 @@ from astrbot.api.message_components import (
     Node,
     Nodes,
     Plain,
+    Video,
 )
 
 from .config import PluginConfig
@@ -82,6 +83,28 @@ async def recall_message(event: AstrMessageEvent, message_id: int | None) -> Non
         pass
 
 
+def _split_video_messages(
+    messages: list[list[BaseMessageComponent]],
+) -> tuple[list[list[BaseMessageComponent]], list[list[Video]]]:
+    """把含视频的消息拆为「其余组件消息 + 纯视频消息」两组。
+
+    OneBot 协议端（NapCat 等）要求 video 段必须是消息中唯一的段，
+    与文本/图片混链会被整体拒绝（retcode=1404/1400）。
+    """
+    others: list[list[BaseMessageComponent]] = []
+    videos: list[list[Video]] = []
+    for message in messages:
+        video_comps = [comp for comp in message if isinstance(comp, Video)]
+        if not video_comps:
+            others.append(message)
+            continue
+        rest = [comp for comp in message if not isinstance(comp, Video)]
+        if rest:
+            others.append(rest)
+        videos.extend([video] for video in video_comps)
+    return others, videos
+
+
 async def send_parsed_messages(
     event: AstrMessageEvent,
     messages: list[list[BaseMessageComponent]],
@@ -91,28 +114,42 @@ async def send_parsed_messages(
 ) -> bool:
     """按配置发送解析结果：合并转发（Nodes）或逐条发送。
 
-    合并转发失败时降级为逐条发送（DESIGN.md §9 第 3 条登记的差异）。
+    - 视频始终独占一条消息单独发送（协议端硬性要求，且 QQ 客户端
+      对合并转发节点内的视频段支持差）
+    - 合并转发发送失败时降级为逐条发送（DESIGN.md §9 第 3 条）
     """
     if is_disposed() or not messages:
         return False
 
-    if config.use_figure and is_supported_platform(event):
+    figure_messages, video_messages = _split_video_messages(messages)
+
+    if config.use_figure and is_supported_platform(event) and figure_messages:
         try:
             sender_id = event.get_sender_id() or "0"
             sender_name = event.get_sender_name() or sender_id
             nodes = Nodes(
                 [
                     Node(uin=sender_id, name=sender_name, content=message)
-                    for message in messages
+                    for message in figure_messages
                 ]
             )
             await event.send(MessageChain(chain=[nodes]))
-            return True
         except Exception as error:
             logger.warn(f"合并转发发送失败，降级为逐条发送：{format_error(error)}")
+            for message in figure_messages:
+                if is_disposed():
+                    return False
+                await event.send(MessageChain(chain=message))
+    elif figure_messages:
+        # 未开启合并转发（或平台不支持）：图文逐条发送
+        for message in figure_messages:
+            if is_disposed():
+                return False
+            await event.send(MessageChain(chain=message))
 
-    for message in messages:
+    # 视频在图文之后逐条发送，每条仅含一个 Video 组件
+    for video_message in video_messages:
         if is_disposed():
             return False
-        await event.send(MessageChain(chain=message))
+        await event.send(MessageChain(chain=video_message))
     return True

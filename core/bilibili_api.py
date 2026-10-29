@@ -337,7 +337,11 @@ class BilibiliApi:
         if not isinstance(data, dict):
             return None
         video_field = data.get("video") or {}
-        if not data.get("bvid") or not data.get("title"):
+        # 标题可能在 data.title 或 data.video.title（对齐原版 title ?? video.title）；
+        # 漏掉 video.title fallback 会把主源的有效响应误判为不可用
+        if not data.get("bvid"):
+            return None
+        if not (data.get("title") or video_field.get("title")):
             return None
         if not video_field.get("url"):
             return None

@@ -295,15 +295,25 @@ async def run_tests() -> int:
     check("合并转发 Nodes 构造", len(forward_chains) == 1)
     if forward_chains:
         nodes = forward_chains[0].nodes
-        # 默认模板无 ${~~~} 拆分符 → 单条消息 → 单节点（对齐原版 figure 行为）
-        check("默认模板单节点", len(nodes) == 1)
+        # 默认模板无 ${~~~} 拆分符 → 图文单节点；视频被拆出单独发送
+        check("默认模板单节点（仅图文）", len(nodes) == 1)
         check("节点 uin 为发送者", all(n.uin == "10001" for n in nodes))
-        video_comps = [
+        node_videos = [
             comp for n in nodes for comp in n.content
             if type(comp).__name__ == "Video"
         ]
-        check("视频组件进入转发节点", len(video_comps) == 1)
-        check("视频文件为 file:// URI", str(video_comps[0].file).startswith("file://"))
+        check("转发节点不含视频（协议端要求）", len(node_videos) == 0)
+
+    # 视频独占一条消息单独发送（OneBot：video 段必须唯一）
+    video_chains = [
+        chain for chain in event.sent
+        if any(type(c).__name__ == "Video" for c in chain.chain)
+    ]
+    check("视频独占一条消息单独发送", len(video_chains) == 1)
+    if video_chains:
+        check("视频消息仅含 Video 组件", len(video_chains[0].chain) == 1)
+        video_comp = video_chains[0].chain[0]
+        check("视频文件为 file:// URI", str(video_comp.file).startswith("file://"))
 
     # 用例 1b：${~~~} 拆分模板 → 多个转发节点
     service1b, rm1b = await make_service(
