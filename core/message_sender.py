@@ -114,8 +114,8 @@ async def send_parsed_messages(
 ) -> bool:
     """按配置发送解析结果：合并转发（Nodes）或逐条发送。
 
-    - 视频始终独占一条消息单独发送（协议端硬性要求，且 QQ 客户端
-      对合并转发节点内的视频段支持差）
+    - 视频必须独占一条消息（OneBot 实现层硬性要求，与图文混链会被拒），
+      合并转发时视频作为独立节点放在图文节点之后，仍属同一条转发
     - 合并转发发送失败时降级为逐条发送（DESIGN.md §9 第 3 条）
     """
     if is_disposed() or not messages:
@@ -123,31 +123,27 @@ async def send_parsed_messages(
 
     figure_messages, video_messages = _split_video_messages(messages)
 
-    if config.use_figure and is_supported_platform(event) and figure_messages:
+    if config.use_figure and is_supported_platform(event):
         try:
             sender_id = event.get_sender_id() or "0"
             sender_name = event.get_sender_name() or sender_id
+            node_contents = figure_messages + video_messages  # 视频节点置后
             nodes = Nodes(
                 [
-                    Node(uin=sender_id, name=sender_name, content=message)
-                    for message in figure_messages
+                    Node(uin=sender_id, name=sender_name, content=content)
+                    for content in node_contents
                 ]
             )
             await event.send(MessageChain(chain=[nodes]))
+            return True
         except Exception as error:
             logger.warn(f"合并转发发送失败，降级为逐条发送：{format_error(error)}")
-            for message in figure_messages:
-                if is_disposed():
-                    return False
-                await event.send(MessageChain(chain=message))
-    elif figure_messages:
-        # 未开启合并转发（或平台不支持）：图文逐条发送
-        for message in figure_messages:
-            if is_disposed():
-                return False
-            await event.send(MessageChain(chain=message))
 
-    # 视频在图文之后逐条发送，每条仅含一个 Video 组件
+    # 降级路径 / 未开启合并转发：图文逐条，视频独占逐条
+    for message in figure_messages:
+        if is_disposed():
+            return False
+        await event.send(MessageChain(chain=message))
     for video_message in video_messages:
         if is_disposed():
             return False
