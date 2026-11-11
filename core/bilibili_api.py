@@ -3,7 +3,7 @@
 对照移植原插件 old/src/bilibili-api.ts：
 - fetch_video_view：经外置 API（api.xingzhige.com/API/b_parse/）解析视频信息与直链
 - resolve_short_link：解析 b23.tv 等短链的真实地址
-- download_video：流式下载视频到文件，支持大小上限与超时
+- download_video：流式下载视频到文件（实现在 core/video_cache.py）
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from .config import PluginConfig
 from .link_parser import VideoTarget
 from .logger import PluginLogger, format_error
 from .request_manager import RequestManager
-from .video_file import create_video_file_name
+from .video_cache import download_video
 from .wbi import BilibiliWbi
 
 # B 站官方 API（v1.3.0 起为兜底源：主源失败时接管，信息全、含真实分 P；
@@ -374,87 +374,17 @@ class BilibiliApi:
             self._logger.debug(f"短链解析失败：{format_error(error)}")
             return None
 
-    # ---- 视频下载 ----
+    # ---- 视频下载（实现见 core/video_cache.py）----
 
     async def download_video(
         self, url: str, title: str, dest_dir: Path
     ) -> tuple[Path, str] | None:
-        """按大小上限流式下载视频到 dest_dir（原版 downloadVideo）。
-
-        返回 (文件路径, MIME 类型)；超限或失败返回 None。
-        """
-        max_mb = self._config.max_file_size_mb
-        max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else 0
-        # sock_read：单次读超时 30s，直链 CDN 停滞时尽早失败而非干等总超时
-        timeout = aiohttp.ClientTimeout(total=120, sock_read=30)
-        self._logger.debug(f"开始下载视频：{url}（上限 {max_mb}MB）")
-        try:
-            async with self._request_manager.session.get(
-                url,
-                headers={
-                    "User-Agent": self._config.user_agent,
-                    "Referer": "https://www.bilibili.com/",
-                    "Accept": "video/*,*/*;q=0.8",
-                },
-                timeout=timeout,
-            ) as response:
-                if response.status < 200 or response.status >= 300:
-                    self._logger.warn(
-                        f"下载视频失败：HTTP {response.status}（{url}）"
-                    )
-                    return None
-
-                content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
-                mime = content_type if content_type.startswith("video/") else "video/mp4"
-
-                declared_size: int | None = None
-                try:
-                    declared_size = int(response.headers.get("Content-Length") or "")
-                except ValueError:
-                    declared_size = None
-                if max_bytes > 0 and declared_size is not None and declared_size > max_bytes:
-                    self._logger.debug(
-                        f"视频大小 {declared_size / 1024 / 1024:.2f}MB 超过 {max_mb}MB，跳过下载"
-                    )
-                    return None
-
-                return await self._read_video_body(
-                    response, max_bytes, max_mb, title, mime, dest_dir
-                )
-        except Exception as error:  # noqa: BLE001 —— 对齐原版 catch-all：网络/超时/磁盘 IO 异常均降级为跳过
-            import traceback
-
-            self._logger.warn(f"下载视频失败：{format_error(error)}（{url}）")
-            self._logger.debug(f"下载视频失败堆栈：\n{traceback.format_exc()}")
-            return None
-
-    async def _read_video_body(
-        self,
-        response: aiohttp.ClientResponse,
-        max_bytes: int,
-        max_mb: int,
-        title: str,
-        mime: str,
-        dest_dir: Path,
-    ) -> tuple[Path, str] | None:
-        """流式写入文件；缺少 Content-Length 时也能及时中止超限文件（原版 readVideoBody）。"""
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        # 以标题命名，协议端展示的文件名即视频标题
-        path = dest_dir / create_video_file_name(title, mime)
-        total_bytes = 0
-        try:
-            with path.open("wb") as file:
-                async for chunk in response.content.iter_chunked(64 * 1024):
-                    if not chunk:
-                        continue
-                    total_bytes += len(chunk)
-                    if max_bytes > 0 and total_bytes > max_bytes:
-                        self._logger.debug(f"视频大小超过 {max_mb}MB，跳过下载")
-                        path.unlink(missing_ok=True)
-                        return None
-                    file.write(chunk)
-        except Exception:
-            path.unlink(missing_ok=True)
-            raise
-        self._logger.debug(f"视频下载完成，大小：{total_bytes / 1024 / 1024:.2f}MB")
-        return path, mime
+        """下载视频到 dest_dir；返回 (文件路径, MIME 类型)，超限或失败返回 None。"""
+        return await download_video(
+            self._request_manager.session,
+            self._config,
+            self._logger,
+            url,
+            title,
+            dest_dir,
+        )

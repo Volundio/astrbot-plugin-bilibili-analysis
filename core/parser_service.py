@@ -5,6 +5,7 @@
 - 频率限制在入队前与处理时双重校验，超限清空对应用户/会话任务
 - 频道级「同链接最小间隔」去重
 - 单个目标处理流程：等待提示 → 解析 API → 撤回提示 → 按模板下载视频 → 渲染 → 发送
+- 下载的视频缓存保留一小时后自动清理（见 core/video_cache.py）
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from .logger import PluginLogger, format_error
 from . import message_sender
 from .message_sender import send_parsed_messages, send_wait_tip, recall_message
 from .rate_limiter import VideoRateLimiter
+from .video_cache import VIDEO_CACHE_SWEEP_INTERVAL_S, purge_expired_videos
 from .video_formatter import build_video_messages, has_video_placeholder
 
 
@@ -56,6 +58,8 @@ class VideoParseService:
         # 原版 sessionQueue + isProcessingSession → asyncio.Queue + 常驻 worker
         self._queue: asyncio.Queue[_SessionTask | None] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
+        # 视频缓存过期巡检任务
+        self._cache_cleaner: asyncio.Task | None = None
         self._disposed = False
 
     # ---- 生命周期 ----
@@ -65,6 +69,10 @@ class VideoParseService:
         if self._worker is None or self._worker.done():
             self._worker = asyncio.get_running_loop().create_task(
                 self._worker_loop(), name="bilibili-analysis:parser"
+            )
+        if self._cache_cleaner is None or self._cache_cleaner.done():
+            self._cache_cleaner = asyncio.get_running_loop().create_task(
+                self._cache_cleaner_loop(), name="bilibili-analysis:cache-cleaner"
             )
 
     async def close(self) -> None:
@@ -79,6 +87,10 @@ class VideoParseService:
                 self._worker.cancel()
                 await asyncio.gather(self._worker, return_exceptions=True)
         self._worker = None
+        if self._cache_cleaner and not self._cache_cleaner.done():
+            self._cache_cleaner.cancel()
+            await asyncio.gather(self._cache_cleaner, return_exceptions=True)
+        self._cache_cleaner = None
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -89,6 +101,23 @@ class VideoParseService:
     @property
     def is_disposed(self) -> bool:
         return self._disposed
+
+    # ---- 视频缓存清理 ----
+
+    async def _cache_cleaner_loop(self) -> None:
+        """启动时先清一次（处理上次运行的遗留），之后定时巡检。"""
+        while not self._disposed:
+            self._purge_expired_cache()
+            await asyncio.sleep(VIDEO_CACHE_SWEEP_INTERVAL_S)
+
+    def _purge_expired_cache(self) -> None:
+        try:
+            removed = purge_expired_videos(self._video_dir)
+        except Exception as error:  # noqa: BLE001 —— 清理失败不得影响解析流程
+            self._logger.warn(f"清理视频缓存失败：{format_error(error)}")
+            return
+        if removed:
+            self._logger.debug(f"已清理过期视频缓存 {removed} 个")
 
     # ---- 入队（原版 enqueue，监听器调用）----
 
@@ -251,6 +280,20 @@ class VideoParseService:
 
         self._logger.debug(f"解析结果：{view.title} {view.bvid} p={target.page}")
 
+        try:
+            return await self._download_and_send(event, target, source, view)
+        finally:
+            # 视频缓存不随发送结果即时删除：统一保留一小时后清理，
+            # 无论本次发送成功、失败还是中途异常
+            self._purge_expired_cache()
+
+    async def _download_and_send(
+        self,
+        event: AstrMessageEvent,
+        target: VideoTarget,
+        source: str,
+        view: BiliVideoView,
+    ) -> bool:
         video_path: Path | None = None
         # sendVideo 开关关闭时跳过下载，${视频} 占位符渲染为空，仅发送消息模板
         if self._config.send_video and has_video_placeholder(self._config, source):
@@ -288,18 +331,6 @@ class VideoParseService:
         if not sent:
             return False
         self._logger.debug(f"发送完成：{view.bvid}")
-
-        # 临时视频文件清理：优先交给事件生命周期兜底，否则立即删除
-        if video_path is not None:
-            track = getattr(event, "track_temporary_local_file", None)
-            if callable(track):
-                try:
-                    track(str(video_path))
-                    video_path = None
-                except Exception:
-                    pass
-            if video_path is not None:
-                video_path.unlink(missing_ok=True)
         return True
 
     async def _send_wait_tip(self, event: AstrMessageEvent) -> int | None:

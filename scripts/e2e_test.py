@@ -141,6 +141,41 @@ async def _handle_video(request: web.Request) -> web.Response:
     )
 
 
+async def _handle_flaky_video(request: web.Request) -> web.StreamResponse:
+    """模拟 CDN 中途断连：首个请求只发一半就断开，带 Range 的续传请求补齐。"""
+    range_header = request.headers.get("Range")
+    if range_header:
+        start = int(range_header.split("=")[1].split("-")[0])
+        return web.Response(
+            status=206,
+            body=FAKE_VIDEO[start:],
+            content_type="video/mp4",
+            headers={
+                "Content-Range": f"bytes {start}-{len(FAKE_VIDEO) - 1}/{len(FAKE_VIDEO)}"
+            },
+        )
+    response = web.StreamResponse(
+        headers={"Content-Type": "video/mp4", "Content-Length": str(len(FAKE_VIDEO))}
+    )
+    await response.prepare(request)
+    await response.write(FAKE_VIDEO[: len(FAKE_VIDEO) // 2])
+    await asyncio.sleep(0.1)
+    request.transport.abort()
+    return response
+
+
+async def _handle_broken_video(request: web.Request) -> web.StreamResponse:
+    """每次都中途断连且不支持续传：最终应判定失败且不留残留文件。"""
+    response = web.StreamResponse(
+        headers={"Content-Type": "video/mp4", "Content-Length": str(len(FAKE_VIDEO))}
+    )
+    await response.prepare(request)
+    await response.write(FAKE_VIDEO[:1024])
+    await asyncio.sleep(0.05)
+    request.transport.abort()
+    return response
+
+
 async def _handle_big_video(request: web.Request) -> web.Response:
     return web.Response(
         body=FAKE_BIG_VIDEO,
@@ -238,6 +273,8 @@ async def run_tests() -> int:
     app.router.add_get("/nav", _handle_nav)
     app.router.add_get("/video.mp4", _handle_video)
     app.router.add_get("/big.mp4", _handle_big_video)
+    app.router.add_get("/flaky.mp4", _handle_flaky_video)
+    app.router.add_get("/broken.mp4", _handle_broken_video)
     app.router.add_get("/short/xyz", _handle_short)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -338,7 +375,9 @@ async def run_tests() -> int:
     downloaded = list(video_dir.glob("*.mp4"))
     check("视频已下载到本地", len(downloaded) >= 1)
     check("下载内容完整", any(f.stat().st_size == len(FAKE_VIDEO) for f in downloaded))
-    check("临时文件交给事件跟踪清理", len(event.tracked_files) >= 1)
+    # 缓存不随发送即时删除，也不再交给事件跟踪：统一保留一小时后清理
+    check("发送成功后缓存文件保留", (video_dir / "BV1GOODVIDEO.mp4").exists())
+    check("缓存不交给事件跟踪即时清理", len(event.tracked_files) == 0)
 
     # 用例 2：同链接最小间隔去重（默认 180s）
     event2 = MockEvent("https://www.bilibili.com/video/BV1GOODVIDEO")
@@ -423,6 +462,39 @@ async def run_tests() -> int:
     tiny_result = await api_tiny.download_video(f"{base}/big.mp4", "大视频", video_dir)
     check("超上限视频拒绝下载", tiny_result is None)
     check("超限未留下残留文件", not (video_dir / "大视频.mp4").exists())
+
+    # 用例 4b：下载中途断连 → Range 续传补齐
+    flaky_result = await api5.download_video(f"{base}/flaky.mp4", "断连续传", video_dir)
+    check("中途断连后续传成功", flaky_result is not None)
+    check("续传后文件内容完整",
+          flaky_result is not None and flaky_result[0].read_bytes() == FAKE_VIDEO)
+    broken_result = await api5.download_video(f"{base}/broken.mp4", "持续断连", video_dir)
+    check("持续断连最终判定失败", broken_result is None)
+    check("下载失败未留下残留文件", not (video_dir / "持续断连.mp4").exists())
+
+    # 用例 4c：缓存过期清理（保留一小时，按修改时间判定）
+    import os
+    import time as time_mod
+    cache_mod = _load_module("video_cache")
+    check("缓存保留时长为一小时", cache_mod.VIDEO_CACHE_TTL_S == 3600)
+    stale = video_dir / "过期缓存.mp4"
+    fresh = video_dir / "新鲜缓存.mp4"
+    stale.write_bytes(b"old")
+    fresh.write_bytes(b"new")
+    expired_at = time_mod.time() - cache_mod.VIDEO_CACHE_TTL_S - 1
+    os.utime(stale, (expired_at, expired_at))
+    removed = cache_mod.purge_expired_videos(video_dir)
+    check("过期缓存被清理", removed == 1 and not stale.exists())
+    check("未过期缓存保留", fresh.exists())
+    check("缓存目录不存在时清理不报错",
+          cache_mod.purge_expired_videos(video_dir / "不存在") == 0)
+    # 解析流程收尾（finally）触发清理：过期文件删除，本次下载的文件保留
+    os.utime(fresh, (expired_at, expired_at))
+    event4c = MockEvent("https://www.bilibili.com/video/BV1GOODVIDEO")
+    service4.enqueue(event4c, lp_mod.parse_bilibili_content(event4c.message_str), "link")
+    await asyncio.wait_for(service4._queue.join(), timeout=15)
+    check("解析收尾清理过期缓存", not fresh.exists())
+    check("本次下载的缓存未被清理", (video_dir / "BV1GOODVIDEO.mp4").exists())
     await rm_tiny.close()
     await rm4b.close()
     await rm5.close()
@@ -452,6 +524,7 @@ async def run_tests() -> int:
     for mgr in (rm, rm3, rm4, rm6):
         await mgr.close()
     check("worker 正常退出", service._worker is None or service._worker.done())
+    check("缓存巡检任务已停止", service._cache_cleaner is None)
     check("二次 close 幂等", (await service.close()) is None)
 
     await runner.cleanup()
