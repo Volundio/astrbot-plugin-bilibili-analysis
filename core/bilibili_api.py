@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -367,17 +366,17 @@ class BilibiliApi:
                     if not location:
                         return None
                     return urljoin(str(response.url), location)
-                text = await response.text()
+                text = await response.text(errors="ignore")
                 match = re.search(r"""https?://[^"'<\s]+""", text, re.IGNORECASE)
                 return match.group(0) if match else None
-        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        except Exception as error:  # noqa: BLE001 —— 外部请求异常统一降级
             self._logger.debug(f"短链解析失败：{format_error(error)}")
             return None
 
     # ---- 视频下载（实现见 core/video_cache.py）----
 
     async def download_video(
-        self, url: str, title: str, dest_dir: Path
+        self, url: str, file_stem: str, dest_dir: Path
     ) -> tuple[Path, str] | None:
         """下载视频到 dest_dir；返回 (文件路径, MIME 类型)，超限或失败返回 None。"""
         return await download_video(
@@ -385,6 +384,6 @@ class BilibiliApi:
             self._config,
             self._logger,
             url,
-            title,
+            file_stem,
             dest_dir,
         )

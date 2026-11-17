@@ -22,7 +22,7 @@ from .core.link_parser import (
     target_origin,
 )
 from .core.logger import PluginLogger
-from .core.message_sender import is_supported_platform
+from .core.message_sender import is_self_message, is_supported_platform
 from .core.parser_service import VideoParseService
 from .core.rate_limiter import VideoRateLimiter
 from .core.request_manager import RequestManager
@@ -76,29 +76,37 @@ class BilibiliAnalysisPlugin(Star):
             return
         if not self._config.enablebilianalysis:
             return
+        # 忽略机器人自身发送的消息（防开启上报自身消息时逐条降级纯文本触发回环二次解析）
+        if is_self_message(event):
+            return
+
+        allowed = set(self._config.video_parse_mode)
+        if not allowed:
+            return
 
         chain = event.get_messages()
-        # QQ JSON 分享卡片判定（原版 isJsonCard：消息链中存在 json 元素）。
-        # 卡片是消息级来源：卡片消息中的全部目标按卡片来源处理（对齐原版）
-        is_card = any(isinstance(comp, Json) for comp in chain)
-        allowed = set(self._config.video_parse_mode)
+        msg_str = event.message_str or ""
+        # QQ JSON/XML 分享卡片判定（对齐原版 isJsonCard：消息链含 json/xml 组件或对应前缀）
+        is_card = any(
+            isinstance(comp, Json) or type(comp).__name__ == "Xml" for comp in chain
+        ) or msg_str.lstrip().startswith(("<json", "<xml"))
         if is_card and "card" not in allowed:
             return
 
-        # JSON 卡片内容不会进入 message_str，需单独提取后合并（原版行为）
-        card_text = collect_json_card_text(chain)
-        targets = parse_bilibili_content(
-            f"{event.message_str}\n{card_text}", parse_standalone_ids=True
-        )
-        if not targets:
-            return
-
-        # 非卡片消息按各目标的出现形态逐一过滤：
-        # link=完整链接 / short=短链 / id=独立 BV/AV 号
         if is_card:
-            usable = targets
+            # 卡片是消息级来源：优先提取卡片中的完整链接与短链；仅当完全未提取到链接时
+            # 才回退提取独立 BV/AV 号，避免卡片简介提及的其它视频号被误解析
+            card_text = collect_json_card_text(chain)
+            combined_card = f"{msg_str}\n{card_text}"
+            usable = parse_bilibili_content(combined_card, parse_standalone_ids=False)
+            if not usable:
+                usable = parse_bilibili_content(combined_card, parse_standalone_ids=True)
         else:
+            # 非卡片消息按各目标的出现形态逐一过滤：
+            # link=完整链接 / short=短链 / id=独立 BV/AV 号
+            targets = parse_bilibili_content(msg_str, parse_standalone_ids=True)
             usable = [t for t in targets if target_origin(t) in allowed]
+
         if not usable:
             return
 

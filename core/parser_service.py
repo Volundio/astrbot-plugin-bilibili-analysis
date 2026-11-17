@@ -96,6 +96,7 @@ class VideoParseService:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            self._queue.task_done()
         self._last_processed.clear()
 
     @property
@@ -149,13 +150,6 @@ class VideoParseService:
         self.start()
         return None
 
-    # ---- 点播入口（原版 processTarget：绕过队列直接处理单个目标）----
-
-    async def process_target(self, event: AstrMessageEvent, target: VideoTarget) -> bool:
-        if self._disposed:
-            return False
-        return await self._process_one_target(event, target, "link")
-
     # ---- 串行 worker（原版 processSessionQueue / processSessionTask）----
 
     async def _worker_loop(self) -> None:
@@ -202,6 +196,8 @@ class VideoParseService:
                     await self._process_one_target(task.event, target, task.source)
                 else:
                     await self._process_short_target(task.event, target, task.source)
+            except Exception as error:  # noqa: BLE001 —— 单链接异常不得中断同消息后续链接
+                self._logger.error(f"处理单个链接失败：{format_error(error)}")
             finally:
                 self._rate_limiter.end_channel_video(channel_id)
 
@@ -231,35 +227,47 @@ class VideoParseService:
 
     # ---- 单目标处理（原版 processOneTarget）----
 
-    def _is_processed_recently(self, target: VideoTarget, channel_id: str) -> bool:
-        """同会话同目标在最小间隔内已处理过则跳过（原版 isProcessedRecently）。"""
+    def _reserve_dedup_key(self, target: VideoTarget, channel_id: str) -> str | None:
+        """同会话同目标在最小间隔内已处理过则返回 None；否则预占去重键并返回。"""
         interval_ms = self._config.min_interval_s * 1000
         current = time.time() * 1000
-        expired = [
-            key
-            for key, ts in self._last_processed.items()
-            if current - ts >= interval_ms
-        ]
-        for key in expired:
+        for key in [k for k, ts in self._last_processed.items() if current - ts >= interval_ms]:
             del self._last_processed[key]
 
         channel_key = f"{channel_id}:{target.key}"
         last_time = self._last_processed.get(channel_key)
         if last_time is not None and current - last_time < interval_ms:
             self._logger.debug(f"相同视频跳过：{target.key}，会话：{channel_id}")
-            return True
+            return None
         self._last_processed[channel_key] = current
+        return channel_key
+
+    def _check_and_record_view_keys(
+        self, view: BiliVideoView, page: int, channel_id: str, reserved_key: str
+    ) -> bool:
+        """补齐 BV / AV 双形态去重键；若另一形态在间隔内已处理则返回 True。"""
+        interval_ms = self._config.min_interval_s * 1000
+        current = time.time() * 1000
+        keys = [
+            *(f"{channel_id}:{view.bvid}:{page}" for _ in (1,) if view.bvid),
+            *(f"{channel_id}:av{view.aid}:{page}" for _ in (1,) if view.aid),
+        ]
+        for key in keys:
+            if key != reserved_key and (ts := self._last_processed.get(key)) is not None:
+                if current - ts < interval_ms:
+                    return True
+        for key in keys:
+            self._last_processed[key] = current
         return False
 
     async def _process_one_target(
-        self,
-        event: AstrMessageEvent,
-        target: VideoTarget,
-        source: str,
+        self, event: AstrMessageEvent, target: VideoTarget, source: str
     ) -> bool:
-        if self._disposed or self._is_processed_recently(
-            target, event.unified_msg_origin
-        ):
+        if self._disposed:
+            return False
+        channel_id = event.unified_msg_origin
+        reserved_key = self._reserve_dedup_key(target, channel_id)
+        if reserved_key is None:
             return False
 
         wait_tip_id = await self._send_wait_tip(event)
@@ -272,10 +280,18 @@ class VideoParseService:
             await recall_message(event, wait_tip_id)
 
         if self._disposed or view is None:
-            if self._config.show_error and view is None:
+            # 解析失败或已卸载时回滚本次去重预占，允许用户重发立即重试
+            self._last_processed.pop(reserved_key, None)
+            if not self._disposed and self._config.show_error and view is None:
                 await message_sender.send_plain(
                     event, "无法解析该链接，可能视频不存在或暂不可见"
                 )
+            return False
+
+        if self._check_and_record_view_keys(view, target.page, channel_id, reserved_key):
+            self._logger.debug(
+                f"相同视频（跨号形态）跳过：{view.bvid or view.aid}，会话：{channel_id}"
+            )
             return False
 
         self._logger.debug(f"解析结果：{view.title} {view.bvid} p={target.page}")
@@ -299,10 +315,11 @@ class VideoParseService:
         if self._config.send_video and has_video_placeholder(self._config, source):
             video_url = await self._api.fetch_video_url(view, target.page)
             if video_url:
-                # 文件名用视频号（纯 ASCII）：合并转发节点内的视频由协议端
-                # 按 file:// 路径直接读取，含 emoji/中文的标题文件名在协议端
-                # 解码不可靠（realpath ENOENT）
-                file_stem = view.bvid or f"av{view.aid}"
+                # 缓存文件名用纯 ASCII 视频号，多分 P 带 _pN 后缀防互相覆盖
+                base_stem = view.bvid or f"av{view.aid}"
+                file_stem = (
+                    f"{base_stem}_p{target.page}" if target.page > 1 else base_stem
+                )
                 downloaded = await self._api.download_video(
                     video_url, file_stem, self._video_dir
                 )

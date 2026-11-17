@@ -13,13 +13,13 @@ from typing import Any
 
 # 默认通用模板（emoji 风格；占位符语义见 docs/DESIGN.md 第 7 节）
 DEFAULT_LINK_TEMPLATE = (
-    " ${标题}\n"
+    "${标题}\n"
     "👤 ${UP主}\n"
     "\n"
     "👍 ${点赞} ${tab} 🪙 ${投币} ${tab} ⭐ ${收藏}\n"
     "👀 ${观看} ${tab} 💬 ${弹幕} ${tab} 🔁 ${转发}\n"
     "\n"
-    " ${简介}\n"
+    "${简介}\n"
     "\n"
     "${视频地址}\n"
     "\n"
@@ -31,13 +31,13 @@ DEFAULT_LINK_TEMPLATE = (
 
 # 默认卡片模板（与通用模板同布局，可独立自定义）
 DEFAULT_CARD_TEMPLATE = (
-    " ${标题}\n"
+    "${标题}\n"
     "👤 ${UP主}\n"
     "\n"
     "👍 ${点赞} ${tab} 🪙 ${投币} ${tab} ⭐ ${收藏}\n"
     "👀 ${观看} ${tab} 💬 ${弹幕} ${tab} 🔁 ${转发}\n"
     "\n"
-    " ${简介}\n"
+    "${简介}\n"
     "\n"
     "${视频地址}\n"
     "\n"
@@ -138,12 +138,23 @@ class PluginConfig:
         """把 AstrBot 注入的原始配置 dict 归一为 PluginConfig。"""
         raw = raw or {}
 
-        parse_mode_raw = raw.get("videoParseMode") or list(VALID_PARSE_MODES)
-        if isinstance(parse_mode_raw, str):
-            parse_mode_raw = [parse_mode_raw]
-        parse_modes = tuple(
-            mode for mode in parse_mode_raw if mode in VALID_PARSE_MODES
-        ) or VALID_PARSE_MODES
+        parse_mode_raw = raw.get("videoParseMode")
+        if parse_mode_raw is None:
+            parse_modes: tuple[str, ...] = VALID_PARSE_MODES
+        else:
+            if isinstance(parse_mode_raw, str):
+                parse_mode_raw = [parse_mode_raw] if parse_mode_raw.strip() else []
+            if isinstance(parse_mode_raw, (list, tuple, set)):
+                # 用户在配置页显式取消全部来源（空列表）时，保留为空元组（不触发任何来源）
+                if len(parse_mode_raw) == 0:
+                    parse_modes = ()
+                else:
+                    parse_modes = (
+                        tuple(mode for mode in parse_mode_raw if mode in VALID_PARSE_MODES)
+                        or VALID_PARSE_MODES
+                    )
+            else:
+                parse_modes = VALID_PARSE_MODES
 
         request_mode = _as_str(raw.get("requestMode"), "parallel").strip().lower()
         if request_mode not in VALID_REQUEST_MODES:
@@ -169,7 +180,7 @@ class PluginConfig:
             parse_limit=_as_int(raw.get("parseLimit"), 3, minimum=1),
             link_template=link_template,
             card_template=card_template,
-            desc_max_len=_as_int(raw.get("bVideoShowIntroductionTofixed"), 50),
+            desc_max_len=_as_int(raw.get("bVideoShowIntroductionTofixed"), 50, minimum=0),
             use_numeral=_as_bool(raw.get("useNumeral"), True),
             video_id_preference=id_pref,
             max_file_size_mb=_as_int(raw.get("MaximumFileSizeMB"), 50, minimum=0),

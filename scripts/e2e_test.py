@@ -518,6 +518,107 @@ async def run_tests() -> int:
     check("danmuku 字段兜底", view is not None and view.stat.danmaku == 99)
     await rm6.close(); await rm6b.close()
 
+    # 用例 7：合并转发超时不触发降级重发（修复双份消息核心回归）
+    service7, rm7 = await make_service(isfigure=True)
+    event7 = MockEvent("https://www.bilibili.com/video/BV1GOODVIDEO?p=3")
+
+    async def _timeout_forward(action: str, **params) -> dict:
+        event7.bot.actions.append((action, params))
+        if action == "send_group_forward_msg":
+            raise RuntimeError("NetworkError: WebSocket API call timeout")
+        return {}
+
+    event7.bot.call_action = _timeout_forward  # type: ignore[method-assign]
+    service7.enqueue(event7, lp_mod.parse_bilibili_content(event7.message_str), "link")
+    await asyncio.wait_for(service7._queue.join(), timeout=15)
+    check("合并转发超时不触发逐条重发", len(event7.sent) == 0)
+    check("多分 P 缓存文件按 _pN 独立命名", (video_dir / "BV1GOODVIDEO_p3.mp4").exists())
+    await service7.close()
+    await rm7.close()
+
+    # 用例 8：合并转发视频节点失败（ActionFailed）优先降级为仅图文转发，单条视频发送失败不崩溃
+    service8, rm8 = await make_service(isfigure=True)
+    event8 = MockEvent("https://www.bilibili.com/video/BV1GOODVIDEO?p=4")
+
+    async def _video_fwd_fail(action: str, **params) -> dict:
+        event8.bot.actions.append((action, params))
+        if action == "send_group_forward_msg":
+            has_vid = any(
+                s["type"] == "video"
+                for n in params.get("messages", [])
+                for s in n["data"]["content"]
+            )
+            if has_vid:
+                raise RuntimeError("ActionFailed: video callback unreachable")
+        return {}
+
+    async def _video_send_fail(chain) -> None:
+        if any(type(c).__name__ == "Video" for c in chain.chain):
+            raise RuntimeError("ActionFailed: video send failed")
+        event8.sent.append(chain)
+
+    event8.bot.call_action = _video_fwd_fail  # type: ignore[method-assign]
+    event8.send = _video_send_fail  # type: ignore[method-assign]
+    service8.enqueue(event8, lp_mod.parse_bilibili_content(event8.message_str), "link")
+    await asyncio.wait_for(service8._queue.join(), timeout=15)
+    fwd8 = [p for a, p in event8.bot.actions if a == "send_group_forward_msg"]
+    check("含视频转发被拒后降级尝试仅图文合并转发", len(fwd8) == 2 and len(fwd8[1]["messages"]) == 1)
+    check("仅图文转发成功后不再重复发逐条图文", len(event8.sent) == 0)
+    await service8.close()
+    await rm8.close()
+
+    # 用例 9：同视频 AV ↔ BV 跨形态去重 + 解析失败去重回滚 + 多账号 self_id 透传
+    service9, rm9 = await make_service(isfigure=True, waitTip_Switch="稍候")
+    event9_bv = MockEvent("https://www.bilibili.com/video/BV1OFFICIAL0")
+    import types as _types
+    event9_bv.message_obj = _types.SimpleNamespace(raw_message={"self_id": 88888})
+    service9.enqueue(event9_bv, lp_mod.parse_bilibili_content(event9_bv.message_str), "link")
+    await asyncio.wait_for(service9._queue.join(), timeout=15)
+    check("多账号 self_id 透传到等待提示与撤回及转发",
+          all(params.get("self_id") == 88888 for _, params in event9_bv.bot.actions))
+
+    event9_av = MockEvent("https://www.bilibili.com/video/av170001")
+    service9.enqueue(event9_av, lp_mod.parse_bilibili_content(event9_av.message_str), "link")
+    await asyncio.wait_for(service9._queue.join(), timeout=15)
+    check("同视频 AV 号命中跨形态去重不重复发送",
+          len(event9_av.sent) == 0 and len(event9_av.bot.actions) == 0)
+
+    event9_fail = MockEvent("https://www.bilibili.com/video/BV1MISSING99")
+    service9.enqueue(event9_fail, lp_mod.parse_bilibili_content(event9_fail.message_str), "link")
+    await asyncio.wait_for(service9._queue.join(), timeout=15)
+    check("解析失败回滚去重记录以允许立即重试",
+          f"{event9_fail.unified_msg_origin}:BV1MISSING99:1" not in service9._last_processed)
+    await service9.close()
+    await rm9.close()
+
+    # 用例 10：on_message 入口过滤自身消息 & 卡片忽略简介中的独立 BV 号
+    plugin_mod = sys.modules["plugin_under_test"]
+    mc_mod = sys.modules["astrbot.api.message_components"]
+    plugin_inst = plugin_mod.BilibiliAnalysisPlugin(context=None, config={})
+    await plugin_inst.initialize()
+    enqueued_batches: list = []
+    plugin_inst._service.enqueue = lambda ev, tgts, src: (enqueued_batches.append((tgts, src)) or None)  # type: ignore[method-assign]
+
+    self_ev = MockEvent("https://www.bilibili.com/video/BV1GOODVIDEO", sender_id="77777")
+    self_ev.get_self_id = lambda: "77777"  # type: ignore[attr-defined]
+    await plugin_inst.on_message(self_ev)
+    check("on_message 忽略机器人自身消息", len(enqueued_batches) == 0)
+
+    card_ev = MockEvent("", sender_id="10001")
+    card_ev.get_messages = lambda: [mc_mod.Json(data={  # type: ignore[method-assign]
+        "meta": {
+            "detail_1": {
+                "qqdocurl": "https://b23.tv/7aBcDeF",
+                "desc": "上期视频 BV1OFFICIAL0 欢迎观看",
+            }
+        }
+    })]
+    await plugin_inst.on_message(card_ev)
+    check("卡片含短链时忽略简介中的独立 BV 号",
+          len(enqueued_batches) == 1 and len(enqueued_batches[0][0]) == 1
+          and enqueued_batches[0][1] == "card")
+    await plugin_inst.terminate()
+
     # 生命周期清理（先关 worker 再关共享 session，对齐 main.terminate 顺序）
     for svc in (service, service3, service4, service6):
         await svc.close()

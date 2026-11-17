@@ -300,6 +300,16 @@ def test_config(core):
     check("旧配置来源按新语义解释",
           cfg4.video_parse_mode == ("link", "card"))
 
+    cfg_empty_modes = core.config.PluginConfig.from_user_config({"videoParseMode": []})
+    check("显式空来源列表保留为空（不全开）", cfg_empty_modes.video_parse_mode == ())
+
+    cfg_neg_desc = core.config.PluginConfig.from_user_config(
+        {"bVideoShowIntroductionTofixed": -10}
+    )
+    check("简介负长度钳制为 0", cfg_neg_desc.desc_max_len == 0)
+    check("默认模板无行首残留空格",
+          not cfg.link_template.startswith(" ") and "\n ${简介}" not in cfg.link_template)
+
 
 def test_link_parser(core):
     print("[link_parser]")
@@ -566,6 +576,27 @@ def test_main_import(plugin):
         check("config 兜底为空 dict 而非基类属性", obj_fallback.config == {})
     except Exception as error:  # noqa: BLE001
         check("无 config 回退实例化成功（空配置兜底）", False, str(error))
+
+    ms_mod = sys.modules["plugin_under_test.core.message_sender"]
+
+    class _DummyEvent:
+        def __init__(self, sender_id="10001", self_id=None, raw=None):
+            self._sender = sender_id
+            self._self_id = self_id
+            self.message_obj = types.SimpleNamespace(raw_message=raw) if raw else None
+
+        def get_sender_id(self):
+            return self._sender
+
+        def get_self_id(self):
+            return self._self_id
+
+    check("自身消息识别（get_self_id 相等）",
+          ms_mod.is_self_message(_DummyEvent("999", self_id="999")))
+    check("自身消息识别（message_sent 事件）",
+          ms_mod.is_self_message(_DummyEvent("10001", raw={"post_type": "message_sent"})))
+    check("普通用户消息非自身消息",
+          not ms_mod.is_self_message(_DummyEvent("10001", self_id="999")))
 
 
 def main() -> int:

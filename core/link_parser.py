@@ -189,11 +189,15 @@ def _visit_json_value(value: Any, output: list[str]) -> None:
 
 
 def collect_json_card_text(chain: list[BaseMessageComponent]) -> str:
-    """提取消息链中所有 QQ JSON 卡片组件内的字符串（原版 collectJsonCardText）。"""
+    """提取消息链中所有 QQ JSON/XML 卡片组件内的字符串（原版 collectJsonCardText）。"""
     output: list[str] = []
     for component in chain:
         if isinstance(component, Json):
             _visit_json_value(component.data, output)
+        elif type(component).__name__ == "Xml":
+            data = getattr(component, "data", None)
+            if isinstance(data, str):
+                output.append(data)
     return "\n".join(output)
 
 

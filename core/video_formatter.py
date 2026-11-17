@@ -56,7 +56,7 @@ def _player_link(view: BiliVideoView, page: int) -> str:
 
 def _page_link(config: PluginConfig, view: BiliVideoView) -> str:
     """普通视频页链接，按配置选择 BV/AV 号（原版 pageLink）。"""
-    if config.video_id_preference == "av":
+    if config.video_id_preference == "av" and view.aid:
         return f"https://www.bilibili.com/video/av{view.aid}"
     return f"https://www.bilibili.com/video/{view.bvid}"
 

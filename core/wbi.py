@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import time
 from urllib.parse import urlencode
 
-import aiohttp
-
 from .config import PluginConfig
-from .logger import PluginLogger
+from .logger import PluginLogger, format_error
 from .request_manager import RequestManager
 
 # wbi key 重排表（bilibili-API-collect / mixinKeyEncTab）
@@ -32,10 +31,12 @@ NAV_API = "https://api.bilibili.com/x/web-interface/nav"
 
 # wbi key 缓存有效期（官方约 1 天，保守取 12 小时）
 WBI_KEY_TTL_S = 12 * 3600
+# 获取失败后的重试冷却时长，避免上游不可达时每次解析重复阻塞 10s+10s
+WBI_FAIL_COOLDOWN_S = 60.0
 
 
 class BilibiliWbi:
-    """buvid3 指纹获取与 wbi 参数签名（均带缓存、失败降级）。"""
+    """buvid3 指纹获取与 wbi 参数签名（均走 RequestManager、带缓存与失败冷却）。"""
 
     def __init__(
         self,
@@ -47,8 +48,10 @@ class BilibiliWbi:
         self._request_manager = request_manager
         self._logger = logger
         self._buvid3: str | None = None
+        self._buvid3_fail_ts: float = 0.0
         self._wbi_keys: tuple[str, str] | None = None  # (img_key, sub_key)
         self._wbi_keys_ts: float = 0.0
+        self._wbi_fail_ts: float = 0.0
         self._lock = asyncio.Lock()
 
     async def cookie_header(self) -> dict[str, str]:
@@ -66,58 +69,84 @@ class BilibiliWbi:
 
     # ---- 内部实现 ----
 
+    def _headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": self._config.user_agent,
+            "Referer": "https://www.bilibili.com/",
+            "Accept": "application/json, text/plain, */*",
+        }
+
     async def _ensure_buvid3(self) -> str | None:
         if self._buvid3:
             return self._buvid3
+        if time.time() - self._buvid3_fail_ts < WBI_FAIL_COOLDOWN_S:
+            return None
         async with self._lock:
             if self._buvid3:
                 return self._buvid3
+            if time.time() - self._buvid3_fail_ts < WBI_FAIL_COOLDOWN_S:
+                return None
             try:
-                timeout = aiohttp.ClientTimeout(total=10)
-                async with self._request_manager.session.get(
+                self._buvid3 = await self._request_manager.request(
                     FINGER_API,
-                    headers={
-                        "User-Agent": self._config.user_agent,
-                        "Referer": "https://www.bilibili.com/",
-                        "Accept": "application/json, text/plain, */*",
-                    },
-                    timeout=timeout,
-                ) as response:
-                    payload = await response.json(content_type=None)
-                b_3 = (payload.get("data") or {}).get("b_3")
-                if b_3:
-                    self._buvid3 = str(b_3)
+                    self._headers(),
+                    _parse_buvid3_response,
+                    "buvid3 指纹 API",
+                )
             except Exception as error:  # noqa: BLE001 —— 指纹失败不阻塞主流程
-                self._logger.debug(f"获取 buvid3 失败：{type(error).__name__}")
+                self._buvid3_fail_ts = time.time()
+                self._logger.debug(f"获取 buvid3 失败：{format_error(error)}")
             return self._buvid3
 
     async def _ensure_wbi_keys(self) -> tuple[str, str] | None:
-        if self._wbi_keys and time.time() - self._wbi_keys_ts < WBI_KEY_TTL_S:
+        now = time.time()
+        if self._wbi_keys and now - self._wbi_keys_ts < WBI_KEY_TTL_S:
+            return self._wbi_keys
+        if now - self._wbi_fail_ts < WBI_FAIL_COOLDOWN_S:
             return self._wbi_keys
         async with self._lock:
-            if self._wbi_keys and time.time() - self._wbi_keys_ts < WBI_KEY_TTL_S:
+            now = time.time()
+            if self._wbi_keys and now - self._wbi_keys_ts < WBI_KEY_TTL_S:
+                return self._wbi_keys
+            if now - self._wbi_fail_ts < WBI_FAIL_COOLDOWN_S:
                 return self._wbi_keys
             try:
-                timeout = aiohttp.ClientTimeout(total=10)
-                async with self._request_manager.session.get(
+                keys = await self._request_manager.request(
                     NAV_API,
-                    headers={
-                        "User-Agent": self._config.user_agent,
-                        "Referer": "https://www.bilibili.com/",
-                        "Accept": "application/json, text/plain, */*",
-                    },
-                    timeout=timeout,
-                ) as response:
-                    payload = await response.json(content_type=None)
-                wbi_img = (payload.get("data") or {}).get("wbi_img") or {}
-                img_key = _key_from_url(str(wbi_img.get("img_url") or ""))
-                sub_key = _key_from_url(str(wbi_img.get("sub_url") or ""))
-                if img_key and sub_key:
-                    self._wbi_keys = (img_key, sub_key)
-                    self._wbi_keys_ts = time.time()
-            except Exception as error:  # noqa: BLE001 —— key 失败降级为不签名
-                self._logger.debug(f"获取 wbi key 失败：{type(error).__name__}")
+                    self._headers(),
+                    _parse_wbi_nav_response,
+                    "wbi 密钥 API",
+                )
+                self._wbi_keys = keys
+                self._wbi_keys_ts = time.time()
+            except Exception as error:  # noqa: BLE001 —— key 失败降级为不签名或沿用旧缓存
+                self._wbi_fail_ts = time.time()
+                self._logger.debug(f"获取 wbi key 失败：{format_error(error)}")
             return self._wbi_keys
+
+
+def _parse_buvid3_response(content: str) -> str | None:
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    b_3 = (payload.get("data") or {}).get("b_3")
+    return str(b_3) if b_3 else None
+
+
+def _parse_wbi_nav_response(content: str) -> tuple[str, str] | None:
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    wbi_img = (payload.get("data") or {}).get("wbi_img") or {}
+    img_key = _key_from_url(str(wbi_img.get("img_url") or ""))
+    sub_key = _key_from_url(str(wbi_img.get("sub_url") or ""))
+    return (img_key, sub_key) if img_key and sub_key else None
 
 
 def _key_from_url(url: str) -> str:

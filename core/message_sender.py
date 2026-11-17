@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from typing import Any
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import (
@@ -25,22 +27,86 @@ from .logger import PluginLogger, format_error
 SUPPORTED_PLATFORM = "aiocqhttp"
 
 
+class _ForwardCallTimeoutError(Exception):
+    """合并转发请求已发往协议端，但等待 WebSocket 回包超时。"""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
 def is_supported_platform(event: AstrMessageEvent) -> bool:
     return event.get_platform_name() == SUPPORTED_PLATFORM
 
 
-def _onebot_target(event: AstrMessageEvent) -> tuple[str, dict[str, int | str]]:
-    """返回 (action, 参数字典)，供 send / 撤回等 OneBot API 调用使用。"""
+def _extract_self_id(event: AstrMessageEvent) -> int | str | None:
+    """提取当前机器人自身账号 ID（用于多账号路由与自身消息判定）。"""
+    raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+    if raw is not None and callable(getattr(raw, "get", None)):
+        self_id = raw.get("self_id")
+        if self_id:
+            return self_id
+    get_self_id = getattr(event, "get_self_id", None)
+    if callable(get_self_id):
+        self_id = get_self_id()
+        if self_id:
+            text = str(self_id)
+            return int(text) if text.isdigit() else self_id
+    return None
+
+
+def is_self_message(event: AstrMessageEvent) -> bool:
+    """判断消息是否由机器人自身发出（防开启上报自身消息时回环重复解析）。"""
+    sender_id = str(event.get_sender_id() or "")
+    raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+    if raw is not None and callable(getattr(raw, "get", None)):
+        if raw.get("post_type") == "message_sent":
+            return True
+        raw_self_id = str(raw.get("self_id") or "")
+        raw_user_id = str(raw.get("user_id") or "")
+        if raw_self_id and (raw_self_id == sender_id or raw_self_id == raw_user_id):
+            return True
+    self_id = _extract_self_id(event)
+    if sender_id and self_id is not None and sender_id == str(self_id):
+        return True
+    return False
+
+
+def _is_call_action_timeout(error: BaseException) -> bool:
+    """判断 OneBot call_action 异常是否为等待回包超时。
+
+    请求已发往协议端后若仅因大视频上传耗时超过 aiocqhttp 的 api_timeout_sec
+    而超时，协议端仍在后台继续上传并最终送达，此时降级重发会产生双份消息。
+    """
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    detail = f"{type(error).__name__}: {error}".lower()
+    return "timeout" in detail or "timed out" in detail
+
+
+def _onebot_target(event: AstrMessageEvent) -> tuple[str, dict[str, Any]]:
+    """返回 (action, 参数字典)，供等待提示发送等 OneBot API 调用使用。"""
+    params: dict[str, Any]
     group_id = event.get_group_id()
     if group_id:
-        return "send_group_msg", {"group_id": int(group_id) if group_id.isdigit() else group_id}
-    sender_id = event.get_sender_id()
-    return "send_private_msg", {"user_id": int(sender_id) if sender_id.isdigit() else sender_id}
+        action = "send_group_msg"
+        params = {"group_id": int(group_id) if group_id.isdigit() else group_id}
+    else:
+        action = "send_private_msg"
+        sender_id = event.get_sender_id() or ""
+        params = {"user_id": int(sender_id) if sender_id.isdigit() else sender_id}
+    self_id = _extract_self_id(event)
+    if self_id is not None:
+        params["self_id"] = self_id
+    return action, params
 
 
 async def send_plain(event: AstrMessageEvent, text: str) -> None:
     """发送纯文本消息。"""
-    await event.send(MessageChain(chain=[Plain(text=text)]))
+    try:
+        await event.send(MessageChain(chain=[Plain(text=text)]))
+    except Exception:
+        pass
 
 
 async def send_wait_tip(
@@ -77,7 +143,11 @@ async def recall_message(event: AstrMessageEvent, message_id: int | None) -> Non
     if bot is None:
         return
     try:
-        await bot.call_action("delete_msg", message_id=message_id)
+        params: dict[str, Any] = {"message_id": message_id}
+        self_id = _extract_self_id(event)
+        if self_id is not None:
+            params["self_id"] = self_id
+        await bot.call_action("delete_msg", **params)
     except Exception:
         pass
 
@@ -137,8 +207,11 @@ async def _send_forward_message(
     if bot is None:
         raise RuntimeError("当前平台无 bot 实例，无法发送合并转发")
 
-    uin = event.get_sender_id() or "0"
-    nickname = event.get_sender_name() or uin
+    sender_id = event.get_sender_id() or ""
+    self_id = _extract_self_id(event)
+    # OneBot 转发节点要求合法 QQ 号；发送者非纯数字时回退为机器人自身或系统号 10000
+    uin = sender_id if sender_id.isdigit() else (str(self_id) if self_id else "10000")
+    nickname = event.get_sender_name() or sender_id or uin
     messages: list[dict] = []
     for content in node_contents:
         segments = []
@@ -164,22 +237,37 @@ async def _send_forward_message(
     group_id = event.get_group_id()
     if group_id:
         action = "send_group_forward_msg"
-        params: dict = {
+        params: dict[str, Any] = {
             "group_id": int(group_id) if group_id.isdigit() else group_id
         }
     else:
         action = "send_private_forward_msg"
-        sender_id = event.get_sender_id()
         params = {"user_id": int(sender_id) if sender_id.isdigit() else sender_id}
 
-    # 多账号路由（对齐 aiocqhttp 适配器的 self_id 传递）
-    raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
-    if raw is not None and callable(getattr(raw, "get", None)):
-        self_id = raw.get("self_id")
-        if self_id:
-            params["self_id"] = self_id
+    if self_id is not None:
+        params["self_id"] = self_id
 
-    await bot.call_action(action, messages=messages, **params)
+    try:
+        await bot.call_action(action, messages=messages, **params)
+    except Exception as error:
+        if _is_call_action_timeout(error):
+            raise _ForwardCallTimeoutError(error) from error
+        raise
+
+
+async def _send_chain_safely(
+    event: AstrMessageEvent,
+    chain: list[BaseMessageComponent],
+    logger: PluginLogger,
+    label: str,
+) -> bool:
+    """安全发送单条消息链，捕获异常记日志，避免单条失败中断整个任务。"""
+    try:
+        await event.send(MessageChain(chain=chain))
+        return True
+    except Exception as error:  # noqa: BLE001
+        logger.warn(f"{label}发送失败：{format_error(error)}")
+        return False
 
 
 async def send_parsed_messages(
@@ -191,10 +279,12 @@ async def send_parsed_messages(
 ) -> bool:
     """按配置发送解析结果：合并转发或逐条发送。
 
-    - 合并转发不走 AstrBot 的 Nodes 组件，而是手工调用 OneBot 转发 API：
-      节点内视频先经 AstrBot 文件服务上传转回调 URL（协议端分离部署时
-      读不到本地盘，file:// 直传必败）；图文节点在前、视频独占节点在后
-    - 合并转发失败时降级为逐条发送（视频走同一上传通道），保证送达
+    - 合并转发手工调用 OneBot 转发 API：节点内视频先经 AstrBot 文件服务转回调 URL，
+      图文节点在前、视频独占节点在后
+    - 若 call_action 等待回包超时（常见于大视频上传耗时较长），协议端仍在后台继续上传
+      并最终送达，跳过降级重发以免群内出现双份消息
+    - 若发生非超时失败（如 ActionFailed 或回调不可达）：含视频时先尝试仅图文合并转发
+      + 独立补发视频；仍失败再降级为逐条发送
     """
     if is_disposed() or not messages:
         return False
@@ -205,16 +295,45 @@ async def send_parsed_messages(
         try:
             await _send_forward_message(event, figure_messages + video_messages)
             return True
-        except Exception as error:
-            logger.warn(f"合并转发发送失败，降级为逐条发送：{format_error(error)}")
+        except _ForwardCallTimeoutError as error:
+            logger.warn(
+                "合并转发等待协议端响应超时（协议端可能仍在后台上传发送，"
+                f"跳过降级重发以免重复）：{format_error(error.cause)}"
+            )
+            return True
+        except Exception as error:  # noqa: BLE001
+            logger.warn(f"合并转发发送失败，尝试降级发送：{format_error(error)}")
+            if video_messages and figure_messages and not is_disposed():
+                try:
+                    await _send_forward_message(event, figure_messages)
+                    for video_message in video_messages:
+                        if is_disposed():
+                            return True
+                        await _send_chain_safely(
+                            event, video_message, logger, "降级补发视频"
+                        )
+                    return True
+                except _ForwardCallTimeoutError as timeout_err:
+                    logger.warn(
+                        "仅图文合并转发等待协议端响应超时，跳过逐条重发："
+                        f"{format_error(timeout_err.cause)}"
+                    )
+                    return True
+                except Exception as retry_err:  # noqa: BLE001
+                    logger.warn(
+                        f"仅图文合并转发亦失败，降级为逐条发送：{format_error(retry_err)}"
+                    )
 
-    # 降级路径 / 未开启合并转发：图文逐条，视频独占逐条
+    # 降级路径 / 未开启合并转发：图文逐条，视频独占逐条（独立捕获异常）
+    any_sent = False
     for message in figure_messages:
         if is_disposed():
-            return False
-        await event.send(MessageChain(chain=message))
+            return any_sent
+        if await _send_chain_safely(event, message, logger, "解析图文消息"):
+            any_sent = True
     for video_message in video_messages:
         if is_disposed():
-            return False
-        await event.send(MessageChain(chain=video_message))
-    return True
+            return any_sent
+        if await _send_chain_safely(event, video_message, logger, "解析视频消息"):
+            any_sent = True
+    return any_sent
